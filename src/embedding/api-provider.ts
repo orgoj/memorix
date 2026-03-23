@@ -10,37 +10,33 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { EmbeddingProvider } from './provider.js';
+import {
+  getApiEmbeddingConfig,
+  getEmbeddingApiKey,
+  getEmbeddingBaseUrl,
+  getEmbeddingModel,
+  getEmbeddingDimensions,
+} from '../config.js';
 
 const CACHE_DIR = process.env.MEMORIX_DATA_DIR || join(homedir(), '.memorix', 'data');
 const CACHE_FILE = join(CACHE_DIR, '.embedding-api-cache.json');
-const DIMS_CACHE_FILE = join(CACHE_DIR, '.embedding-dims-cache.json');
 
 const cache = new Map<string, number[]>();
-const MAX_CACHE_SIZE = 10000;
 let diskCacheDirty = false;
 let diskSaveTimer: ReturnType<typeof setTimeout> | null = null;
-let diskCacheLoaded = false;
-let diskCacheLoadPromise: Promise<void> | null = null;
 
-const MAX_INPUT_CHARS = 32000;
-const MAX_CONCURRENCY = 4;
-const DISK_SAVE_DEBOUNCE_MS = 5000;
-
-const DEFAULT_MAX_BATCH_SIZE = 2048;
 const DASHSCOPE_MAX_BATCH_SIZE = 10;
-const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 500;
 
-function normalizeText(text: string): string {
-  return text.replace(/\s+/g, ' ').trim().slice(0, MAX_INPUT_CHARS);
+function normalizeText(text: string, config: ReturnType<typeof getApiEmbeddingConfig>): string {
+  return text.replace(/\s+/g, ' ').trim().slice(0, config.maxInputChars);
 }
 
 function textHash(text: string): string {
   return createHash('sha256').update(text).digest('hex').slice(0, 16);
 }
 
-async function loadDiskCache(): Promise<void> {
-  if (diskCacheLoaded) return;
+async function loadDiskCache(config: ReturnType<typeof getApiEmbeddingConfig>): Promise<void> {
+  if (!config.diskCache) return;
   try {
     const raw = await readFile(CACHE_FILE, 'utf-8');
     const entries: [string, number[]][] = JSON.parse(raw);
@@ -49,40 +45,6 @@ async function loadDiskCache(): Promise<void> {
   } catch {
     // No cache file or corrupt cache; start fresh.
   }
-  diskCacheLoaded = true;
-}
-
-/** Start loading disk cache in background (non-blocking). */
-function startDiskCacheLoad(): void {
-  if (diskCacheLoaded || diskCacheLoadPromise) return;
-  diskCacheLoadPromise = loadDiskCache().catch(() => {});
-}
-
-/** Ensure disk cache is loaded (await if still in progress). */
-async function ensureDiskCacheLoaded(): Promise<void> {
-  if (diskCacheLoaded) return;
-  if (diskCacheLoadPromise) { await diskCacheLoadPromise; return; }
-  await loadDiskCache();
-}
-
-/** Load cached probe dimensions from disk. Returns null if not cached. */
-async function loadCachedDims(model: string, baseUrl: string): Promise<number | null> {
-  try {
-    const raw = await readFile(DIMS_CACHE_FILE, 'utf-8');
-    const data = JSON.parse(raw);
-    if (data.model === model && data.baseUrl === baseUrl && typeof data.dimensions === 'number') {
-      return data.dimensions;
-    }
-  } catch { /* no cache or corrupt */ }
-  return null;
-}
-
-/** Persist probe dimensions for fast subsequent starts. */
-async function saveCachedDims(model: string, baseUrl: string, dimensions: number): Promise<void> {
-  try {
-    await mkdir(CACHE_DIR, { recursive: true });
-    await writeFile(DIMS_CACHE_FILE, JSON.stringify({ model, baseUrl, dimensions, ts: Date.now() }));
-  } catch { /* best-effort */ }
 }
 
 async function saveDiskCacheNow(): Promise<void> {
@@ -97,16 +59,16 @@ async function saveDiskCacheNow(): Promise<void> {
   }
 }
 
-function scheduleDiskSave(): void {
+function scheduleDiskSave(config: ReturnType<typeof getApiEmbeddingConfig>): void {
   if (diskSaveTimer) clearTimeout(diskSaveTimer);
   diskSaveTimer = setTimeout(() => {
     saveDiskCacheNow().catch(() => {});
     diskSaveTimer = null;
-  }, DISK_SAVE_DEBOUNCE_MS);
+  }, config.diskSaveDebounce);
 }
 
-function cacheSet(hash: string, value: number[]): void {
-  if (cache.size >= MAX_CACHE_SIZE) {
+function cacheSet(hash: string, value: number[], config: ReturnType<typeof getApiEmbeddingConfig>): void {
+  if (cache.size >= config.cacheSize) {
     const firstKey = cache.keys().next().value;
     if (firstKey !== undefined) cache.delete(firstKey);
   }
@@ -129,17 +91,21 @@ interface EmbeddingAPIResponse {
 }
 
 interface APIEmbeddingConfig {
-  apiKey: string;
+  apiKey?: string;
   baseUrl: string;
   model: string;
   requestedDimensions: number | null;
 }
 
-function getPreferredBatchSize(config: APIEmbeddingConfig): number {
-  if (/dashscope\.aliyuncs\.com/i.test(config.baseUrl)) {
+function isLocalEmbeddingEndpoint(baseUrl: string): boolean {
+  return /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i.test(baseUrl);
+}
+
+function getPreferredBatchSize(apiConfig: APIEmbeddingConfig, yamlConfig: ReturnType<typeof getApiEmbeddingConfig>): number {
+  if (/dashscope\.aliyuncs\.com/i.test(apiConfig.baseUrl)) {
     return DASHSCOPE_MAX_BATCH_SIZE;
   }
-  return DEFAULT_MAX_BATCH_SIZE;
+  return yamlConfig.batchSize;
 }
 
 function parseBatchLimit(error: unknown): number | null {
@@ -161,67 +127,36 @@ export class APIEmbeddingProvider implements EmbeddingProvider {
   readonly dimensions: number;
 
   private config: APIEmbeddingConfig;
+  private yamlConfig: ReturnType<typeof getApiEmbeddingConfig>;
   private totalTokensUsed = 0;
   private totalApiCalls = 0;
 
-  private constructor(config: APIEmbeddingConfig, detectedDimensions: number) {
+  private constructor(config: APIEmbeddingConfig, yamlConfig: ReturnType<typeof getApiEmbeddingConfig>, detectedDimensions: number) {
     this.config = config;
+    this.yamlConfig = yamlConfig;
     this.dimensions = detectedDimensions;
     this.name = `api-${config.model.replace(/\//g, '-')}`;
   }
 
   static async create(): Promise<APIEmbeddingProvider> {
     const config = APIEmbeddingProvider.resolveConfig();
+    const yamlConfig = getApiEmbeddingConfig();
 
-    // Start loading the 45MB+ embedding cache in the background (non-blocking).
-    // It will be awaited on first embed() call if not yet ready.
-    startDiskCacheLoad();
+    await loadDiskCache(yamlConfig);
 
-    // Try cached dimensions first to avoid a network probe on cold start
-    let probeDimensions = await loadCachedDims(config.model, config.baseUrl);
-    if (probeDimensions !== null) {
-      console.error(`[memorix] API embedding: ${config.model} @ ${config.baseUrl} (${probeDimensions}d) [cached dims]`);
-    } else {
-      probeDimensions = await APIEmbeddingProvider.probeAPI(config);
-      console.error(`[memorix] API embedding: ${config.model} @ ${config.baseUrl} (${probeDimensions}d)`);
-      // Persist for next cold start
-      saveCachedDims(config.model, config.baseUrl, probeDimensions).catch(() => {});
-    }
-    if (config.requestedDimensions) {
-      console.error(`[memorix] Dimension shortening: ${config.requestedDimensions}d requested`);
-    }
+    const dimensions = await APIEmbeddingProvider.probeAPI(config, yamlConfig);
+    console.error(`[memorix] API embedding: ${config.model} @ ${config.baseUrl} (${dimensions}d)`);
 
-    return new APIEmbeddingProvider(config, probeDimensions);
+    return new APIEmbeddingProvider(config, yamlConfig, dimensions);
   }
 
   private static resolveConfig(): APIEmbeddingConfig {
-    let apiKey: string | undefined;
-    let baseUrl: string;
-    let model: string;
-    let requestedDimensions: number | null;
+    const apiKey = getEmbeddingApiKey();
+    let baseUrl = getEmbeddingBaseUrl();
+    const model = getEmbeddingModel();
+    const requestedDimensions = getEmbeddingDimensions();
 
-    try {
-      const cfg = require('../config.js');
-      apiKey = cfg.getEmbeddingApiKey();
-      baseUrl = cfg.getEmbeddingBaseUrl();
-      model = cfg.getEmbeddingModel();
-      requestedDimensions = cfg.getEmbeddingDimensions();
-    } catch {
-      apiKey =
-        process.env.MEMORIX_EMBEDDING_API_KEY ||
-        process.env.MEMORIX_API_KEY ||
-        process.env.MEMORIX_LLM_API_KEY ||
-        process.env.OPENAI_API_KEY;
-      baseUrl =
-        process.env.MEMORIX_EMBEDDING_BASE_URL ||
-        process.env.MEMORIX_LLM_BASE_URL ||
-        'https://api.openai.com/v1';
-      model = process.env.MEMORIX_EMBEDDING_MODEL || 'text-embedding-3-small';
-      const dimStr = process.env.MEMORIX_EMBEDDING_DIMENSIONS;
-      requestedDimensions = dimStr ? parseInt(dimStr, 10) : null;
-    }
-
-    if (!apiKey) {
+    if (!apiKey && !isLocalEmbeddingEndpoint(baseUrl)) {
       throw new Error(
         'No API key for embedding. Set MEMORIX_EMBEDDING_API_KEY, MEMORIX_LLM_API_KEY, or OPENAI_API_KEY, or run `memorix configure`.',
       );
@@ -232,7 +167,7 @@ export class APIEmbeddingProvider implements EmbeddingProvider {
     return { apiKey, baseUrl, model, requestedDimensions };
   }
 
-  private static async probeAPI(config: APIEmbeddingConfig): Promise<number> {
+  private static async probeAPI(config: APIEmbeddingConfig, yamlConfig: ReturnType<typeof getApiEmbeddingConfig>): Promise<number> {
     const body: Record<string, unknown> = {
       model: config.model,
       input: 'dimension probe',
@@ -245,6 +180,7 @@ export class APIEmbeddingProvider implements EmbeddingProvider {
       `${config.baseUrl}/embeddings`,
       config.apiKey,
       body,
+      yamlConfig,
     );
 
     if (response.data.length === 0 || !response.data[0].embedding) {
@@ -255,77 +191,39 @@ export class APIEmbeddingProvider implements EmbeddingProvider {
   }
 
   async embed(text: string): Promise<number[]> {
-    const normalized = normalizeText(text);
+    const normalized = normalizeText(text, this.yamlConfig);
     const hash = textHash(normalized);
+    const cached = cache.get(hash);
+    if (cached) return cached;
 
-    // Fast path: cache already loaded (warm process) — instant lookup
-    if (diskCacheLoaded) {
-      const cached = cache.get(hash);
-      if (cached) return cached;
-    }
-
-    // Cold-start path: cache is still loading in background.
-    // Race the cache completion (may have a hit) against the API call.
-    // Whichever resolves first with a valid embedding wins.
-    const apiCall = async (): Promise<number[]> => {
-      const body: Record<string, unknown> = {
-        model: this.config.model,
-        input: normalized,
-      };
-      if (this.config.requestedDimensions) {
-        body.dimensions = this.config.requestedDimensions;
-      }
-      const response = await fetchWithRetry(
-        `${this.config.baseUrl}/embeddings`,
-        this.config.apiKey,
-        body,
-      );
-      const embedding = response.data[0].embedding;
-      if (embedding.length !== this.dimensions) {
-        throw new Error(`Expected ${this.dimensions}d, got ${embedding.length}d; dimension mismatch`);
-      }
-      this.trackUsage(response);
-      return embedding;
+    const body: Record<string, unknown> = {
+      model: this.config.model,
+      input: normalized,
     };
-
-    let embedding: number[];
-
-    if (!diskCacheLoaded && diskCacheLoadPromise) {
-      // Race: cache load + lookup vs API call
-      const cacheRace = diskCacheLoadPromise.then(() => {
-        const cached = cache.get(hash);
-        if (cached) return cached;
-        return null; // miss — let API win
-      });
-
-      const result = await Promise.race([
-        cacheRace,
-        apiCall().then(v => ({ __api: true, v } as const)),
-      ]);
-
-      if (result && typeof result === 'object' && '__api' in result) {
-        // API finished first
-        embedding = result.v;
-      } else if (result) {
-        // Cache hit won the race
-        return result as number[];
-      } else {
-        // Cache loaded but missed — await the API call
-        embedding = await apiCall();
-      }
-    } else {
-      // No cache loading — just call API
-      embedding = await apiCall();
+    if (this.config.requestedDimensions) {
+      body.dimensions = this.config.requestedDimensions;
     }
 
-    cacheSet(hash, embedding);
-    scheduleDiskSave();
+    const response = await fetchWithRetry(
+      `${this.config.baseUrl}/embeddings`,
+      this.config.apiKey,
+      body,
+      this.yamlConfig,
+    );
+
+    const embedding = response.data[0].embedding;
+    if (embedding.length !== this.dimensions) {
+      throw new Error(`Expected ${this.dimensions}d, got ${embedding.length}d; dimension mismatch`);
+    }
+
+    this.trackUsage(response);
+    cacheSet(hash, embedding, this.yamlConfig);
+    scheduleDiskSave(this.yamlConfig);
     return embedding;
   }
 
   async embedBatch(texts: string[]): Promise<number[][]> {
-    await ensureDiskCacheLoaded();
-    const normalizedTexts = texts.map(normalizeText);
+    const normalizedTexts = texts.map(t => normalizeText(t, this.yamlConfig));
     const results: number[][] = new Array(texts.length);
     const uncachedIndices: number[] = [];
     const uncachedTexts: string[] = [];
@@ -364,6 +262,7 @@ export class APIEmbeddingProvider implements EmbeddingProvider {
           `${this.config.baseUrl}/embeddings`,
           this.config.apiKey,
           body,
+          this.yamlConfig,
         );
 
         this.trackUsage(response);
@@ -371,7 +270,7 @@ export class APIEmbeddingProvider implements EmbeddingProvider {
         for (const item of response.data) {
           const originalIdx = chunkIndices[item.index];
           results[originalIdx] = item.embedding;
-          cacheSet(textHash(normalizedTexts[originalIdx]), item.embedding);
+          cacheSet(textHash(normalizedTexts[originalIdx]), item.embedding, this.yamlConfig);
         }
       } catch (error) {
         const providerLimit = parseBatchLimit(error);
@@ -394,7 +293,7 @@ export class APIEmbeddingProvider implements EmbeddingProvider {
       }
     };
 
-    const preferredBatchSize = getPreferredBatchSize(this.config);
+    const preferredBatchSize = getPreferredBatchSize(this.config, this.yamlConfig);
     const chunks: { texts: string[]; indices: number[] }[] = [];
     for (let batchStart = 0; batchStart < uncachedTexts.length; batchStart += preferredBatchSize) {
       chunks.push({
@@ -403,12 +302,12 @@ export class APIEmbeddingProvider implements EmbeddingProvider {
       });
     }
 
-    for (let ci = 0; ci < chunks.length; ci += MAX_CONCURRENCY) {
-      const concurrentChunks = chunks.slice(ci, ci + MAX_CONCURRENCY);
+    for (let ci = 0; ci < chunks.length; ci += this.yamlConfig.maxConcurrency) {
+      const concurrentChunks = chunks.slice(ci, ci + this.yamlConfig.maxConcurrency);
       await Promise.all(concurrentChunks.map((chunk) => processChunk(chunk.texts, chunk.indices)));
     }
 
-    scheduleDiskSave();
+    scheduleDiskSave(this.yamlConfig);
     return results;
   }
 
@@ -430,19 +329,20 @@ export class APIEmbeddingProvider implements EmbeddingProvider {
 
 async function fetchWithRetry(
   url: string,
-  apiKey: string,
+  apiKey: string | undefined,
   body: Record<string, unknown>,
+  config: ReturnType<typeof getApiEmbeddingConfig>,
   attempt = 0,
 ): Promise<EmbeddingAPIResponse> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10_000);
+  const timeout = setTimeout(() => controller.abort(), config.timeout);
   let response: Response;
   try {
     response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
+        ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}),
       },
       body: JSON.stringify(body),
       signal: controller.signal,
@@ -450,7 +350,7 @@ async function fetchWithRetry(
   } catch (err: unknown) {
     clearTimeout(timeout);
     if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error(`Embedding API timeout after 10s: ${url}`);
+      throw new Error(`Embedding API timeout after ${config.timeout}ms: ${url}`);
     }
     throw err;
   }
@@ -460,13 +360,13 @@ async function fetchWithRetry(
     return response.json() as Promise<EmbeddingAPIResponse>;
   }
 
-  if ((response.status === 429 || response.status >= 500) && attempt < MAX_RETRIES) {
-    const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+  if ((response.status === 429 || response.status >= 500) && attempt < config.maxRetries) {
+    const delay = config.baseDelay * Math.pow(2, attempt);
     const retryAfter = response.headers.get('retry-after');
     const waitMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : delay;
-    console.error(`[memorix] Embedding API ${response.status}, retry ${attempt + 1}/${MAX_RETRIES} in ${waitMs}ms`);
+    console.error(`[memorix] Embedding API ${response.status}, retry ${attempt + 1}/${config.maxRetries} in ${waitMs}ms`);
     await new Promise(resolve => setTimeout(resolve, waitMs));
-    return fetchWithRetry(url, apiKey, body, attempt + 1);
+    return fetchWithRetry(url, apiKey, body, config, attempt + 1);
   }
 
   const errorText = await response.text().catch(() => 'unknown error');

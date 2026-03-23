@@ -24,6 +24,35 @@ vi.mock('node:fs/promises', () => ({
   mkdir: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('../../src/config.js', () => ({
+  getApiEmbeddingConfig: () => ({
+    batchSize: 2048,
+    maxConcurrency: 4,
+    timeout: 10000,
+    maxRetries: 3,
+    baseDelay: 500,
+    maxInputChars: 32000,
+    cacheSize: 10000,
+    diskCache: true,
+    diskSaveDebounce: 5000,
+  }),
+  getEmbeddingApiKey: () =>
+    process.env.MEMORIX_EMBEDDING_API_KEY ||
+    process.env.MEMORIX_API_KEY ||
+    process.env.MEMORIX_LLM_API_KEY ||
+    process.env.OPENAI_API_KEY,
+  getEmbeddingBaseUrl: () =>
+    process.env.MEMORIX_EMBEDDING_BASE_URL ||
+    process.env.MEMORIX_EMBEDDING_API_BASE_URL ||
+    process.env.MEMORIX_LLM_BASE_URL ||
+    'https://api.openai.com/v1',
+  getEmbeddingModel: () => process.env.MEMORIX_EMBEDDING_MODEL || 'text-embedding-3-small',
+  getEmbeddingDimensions: () => {
+    const value = process.env.MEMORIX_EMBEDDING_DIMENSIONS;
+    return value ? parseInt(value, 10) : null;
+  },
+}));
+
 import { APIEmbeddingProvider } from '../../src/embedding/api-provider.js';
 
 // Helper: create a mock embedding response
@@ -139,6 +168,21 @@ describe('API Embedding Provider', () => {
       delete process.env.OPENAI_API_KEY;
 
       await expect(APIEmbeddingProvider.create()).rejects.toThrow('No API key');
+    });
+
+    it('should allow localhost endpoint without API key', async () => {
+      delete process.env.MEMORIX_EMBEDDING_API_KEY;
+      delete process.env.MEMORIX_LLM_API_KEY;
+      delete process.env.OPENAI_API_KEY;
+      process.env.MEMORIX_EMBEDDING_BASE_URL = 'http://localhost:11434/v1';
+
+      const vec1024 = makeVector(1024);
+      mockFetch.mockResolvedValueOnce(mockEmbeddingResponse([vec1024]));
+
+      await APIEmbeddingProvider.create();
+
+      const [, options] = mockFetch.mock.calls[0];
+      expect(options.headers['Authorization']).toBeUndefined();
     });
 
     it('should throw if probe returns empty data', async () => {

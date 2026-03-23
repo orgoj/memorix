@@ -27,6 +27,8 @@
  * Architecture inspired by Mem0's multi-provider embedding design.
  */
 
+import { getEmbeddingMode as getConfiguredEmbeddingMode } from '../config.js';
+
 export interface EmbeddingProvider {
   /** Provider name for logging/cache keys */
   readonly name: string;
@@ -54,16 +56,7 @@ let lastInitWasTemporaryFailure = false;
  * Default is 'off' to minimize resource usage.
  */
 function getEmbeddingMode(): 'off' | 'fastembed' | 'transformers' | 'api' | 'auto' {
-  // Unified: env vars > config.json > 'off'
-  try {
-    const { getEmbeddingMode: cfgMode } = require('../config.js');
-    return cfgMode();
-  } catch {
-    // Fallback if config module not available
-    const env = process.env.MEMORIX_EMBEDDING?.toLowerCase()?.trim();
-    if (env === 'fastembed' || env === 'transformers' || env === 'api' || env === 'auto') return env;
-    return 'off';
-  }
+  return getConfiguredEmbeddingMode();
 }
 
 /** Minimum interval between retry attempts after a temporary failure (ms). */

@@ -41,6 +41,34 @@ describe('Project-level memorix.yml resolution', () => {
     expect(cfg.llm?.provider).toBe('test-provider');
   });
 
+  it('should load nested embedding API settings from memorix.yml', () => {
+    writeFileSync(
+      ymlPath,
+      [
+        'embedding:',
+        '  provider: api',
+        '  model: test-embed-model',
+        '  dimensions: 1024',
+        '  api:',
+        '    baseUrl: http://localhost:11434/v1',
+        '    batchSize: 32',
+        '    maxConcurrency: 2',
+        '    timeout: 120000',
+      ].join('\n') + '\n',
+      'utf-8',
+    );
+
+    initProjectRoot(testDir);
+    const cfg = loadYamlConfig();
+    expect(cfg.embedding?.provider).toBe('api');
+    expect(cfg.embedding?.model).toBe('test-embed-model');
+    expect(cfg.embedding?.dimensions).toBe(1024);
+    expect(cfg.embedding?.api?.baseUrl).toBe('http://localhost:11434/v1');
+    expect(cfg.embedding?.api?.batchSize).toBe(32);
+    expect(cfg.embedding?.api?.maxConcurrency).toBe(2);
+    expect(cfg.embedding?.api?.timeout).toBe(120000);
+  });
+
   it('explicit projectRoot arg should override globalProjectRoot', () => {
     // Set globalProjectRoot to testDir
     writeFileSync(ymlPath, 'llm:\n  provider: from-global\n', 'utf-8');
