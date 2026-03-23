@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 
 // Mock fetch globally
 const mockFetch = vi.fn();
@@ -17,11 +18,17 @@ function mockHeaders(entries: [string, string][] = []): { get: (key: string) => 
   return { get: (key: string) => map.get(key) ?? null };
 }
 
-// Mock fs for disk cache
-vi.mock('node:fs/promises', () => ({
+const fsMocks = vi.hoisted(() => ({
   readFile: vi.fn().mockRejectedValue(new Error('no cache')),
   writeFile: vi.fn().mockResolvedValue(undefined),
   mkdir: vi.fn().mockResolvedValue(undefined),
+}));
+
+// Mock fs for disk cache
+vi.mock('node:fs/promises', () => ({
+  readFile: fsMocks.readFile,
+  writeFile: fsMocks.writeFile,
+  mkdir: fsMocks.mkdir,
 }));
 
 vi.mock('../../src/config.js', () => ({
@@ -82,12 +89,19 @@ function makeVector(dims: number, seed = 0.1): number[] {
   return Array.from({ length: dims }, (_, i) => Math.sin(seed * (i + 1)));
 }
 
+function textHash(text: string): string {
+  return createHash('sha256').update(text.replace(/\s+/g, ' ').trim().slice(0, 32000)).digest('hex').slice(0, 16);
+}
+
 describe('API Embedding Provider', () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
     vi.resetAllMocks();
     vi.stubGlobal('fetch', mockFetch);
+    fsMocks.readFile.mockRejectedValue(new Error('no cache'));
+    fsMocks.writeFile.mockResolvedValue(undefined);
+    fsMocks.mkdir.mockResolvedValue(undefined);
     process.env = {
       ...originalEnv,
       MEMORIX_EMBEDDING: 'api',
@@ -404,6 +418,27 @@ describe('API Embedding Provider', () => {
       });
 
       await expect(provider.embed('auth fail')).rejects.toThrow('401');
+    });
+
+    it('should skip repeatedly failed text after repeated errors', async () => {
+      const probeVec = makeVector(1536);
+      mockFetch.mockResolvedValueOnce(mockEmbeddingResponse([probeVec]));
+      const provider = await APIEmbeddingProvider.create();
+
+      for (let i = 0; i < 3; i++) {
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 500,
+          headers: mockHeaders(),
+          text: () => Promise.resolve('server error'),
+        });
+        await expect(provider.embed('poison-text')).rejects.toThrow();
+      }
+
+      mockFetch.mockReset();
+      const results = await provider.embedBatch(['poison-text']);
+      expect(results[0]).toBeUndefined();
+      expect(mockFetch).toHaveBeenCalledTimes(0);
     });
 
     it('should detect dimension mismatch', async () => {

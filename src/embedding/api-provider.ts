@@ -20,8 +20,11 @@ import {
 
 const CACHE_DIR = process.env.MEMORIX_DATA_DIR || join(homedir(), '.memorix', 'data');
 const CACHE_FILE = join(CACHE_DIR, '.embedding-api-cache.json');
+const FAILURE_FILE = join(CACHE_DIR, '.embedding-api-failures.json');
+const MAX_FAILURES = 3;
 
 const cache = new Map<string, number[]>();
+const failures = new Map<string, number>();
 let diskCacheDirty = false;
 let diskSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -45,14 +48,21 @@ async function loadDiskCache(config: ReturnType<typeof getApiEmbeddingConfig>): 
   } catch {
     // No cache file or corrupt cache; start fresh.
   }
+  try {
+    const raw = await readFile(FAILURE_FILE, 'utf-8');
+    const entries: [string, number][] = JSON.parse(raw);
+    for (const [k, v] of entries) failures.set(k, v);
+  } catch {
+    // No failure file or corrupt file; start fresh.
+  }
 }
 
 async function saveDiskCacheNow(): Promise<void> {
   if (!diskCacheDirty) return;
   try {
     await mkdir(CACHE_DIR, { recursive: true });
-    const entries = Array.from(cache.entries());
-    await writeFile(CACHE_FILE, JSON.stringify(entries));
+    await writeFile(CACHE_FILE, JSON.stringify(Array.from(cache.entries())));
+    await writeFile(FAILURE_FILE, JSON.stringify(Array.from(failures.entries())));
     diskCacheDirty = false;
   } catch {
     // Cache persistence is best-effort only.
@@ -73,6 +83,35 @@ function cacheSet(hash: string, value: number[], config: ReturnType<typeof getAp
     if (firstKey !== undefined) cache.delete(firstKey);
   }
   cache.set(hash, value);
+  failures.delete(hash);
+  diskCacheDirty = true;
+}
+
+function markFailure(hash: string): void {
+  failures.set(hash, (failures.get(hash) ?? 0) + 1);
+  diskCacheDirty = true;
+}
+
+function shouldSkipFailed(hash: string): boolean {
+  return (failures.get(hash) ?? 0) >= MAX_FAILURES;
+}
+
+function clearFailure(hash: string): void {
+  if (failures.delete(hash)) {
+    diskCacheDirty = true;
+  }
+}
+
+function markChunkFailed(texts: string[]): void {
+  for (const text of texts) {
+    markFailure(textHash(text));
+  }
+}
+
+function clearChunkFailures(texts: string[]): void {
+  for (const text of texts) {
+    clearFailure(textHash(text));
+  }
   diskCacheDirty = true;
 }
 
@@ -195,6 +234,9 @@ export class APIEmbeddingProvider implements EmbeddingProvider {
     const hash = textHash(normalized);
     const cached = cache.get(hash);
     if (cached) return cached;
+    if (shouldSkipFailed(hash)) {
+      throw new Error(`Embedding skipped after ${MAX_FAILURES} failures`);
+    }
 
     const body: Record<string, unknown> = {
       model: this.config.model,
@@ -204,15 +246,24 @@ export class APIEmbeddingProvider implements EmbeddingProvider {
       body.dimensions = this.config.requestedDimensions;
     }
 
-    const response = await fetchWithRetry(
-      `${this.config.baseUrl}/embeddings`,
-      this.config.apiKey,
-      body,
-      this.yamlConfig,
-    );
+    let response: EmbeddingAPIResponse;
+    try {
+      response = await fetchWithRetry(
+        `${this.config.baseUrl}/embeddings`,
+        this.config.apiKey,
+        body,
+        this.yamlConfig,
+      );
+    } catch (error) {
+      markFailure(hash);
+      scheduleDiskSave(this.yamlConfig);
+      throw error;
+    }
 
     const embedding = response.data[0].embedding;
     if (embedding.length !== this.dimensions) {
+      markFailure(hash);
+      scheduleDiskSave(this.yamlConfig);
       throw new Error(`Expected ${this.dimensions}d, got ${embedding.length}d; dimension mismatch`);
     }
 
@@ -233,6 +284,8 @@ export class APIEmbeddingProvider implements EmbeddingProvider {
       const cached = cache.get(hash);
       if (cached) {
         results[i] = cached;
+      } else if (shouldSkipFailed(hash)) {
+        continue;
       } else {
         uncachedIndices.push(i);
         uncachedTexts.push(normalizedTexts[i]);
@@ -266,6 +319,7 @@ export class APIEmbeddingProvider implements EmbeddingProvider {
         );
 
         this.trackUsage(response);
+        clearChunkFailures(chunkTexts);
 
         for (const item of response.data) {
           const originalIdx = chunkIndices[item.index];
@@ -289,7 +343,8 @@ export class APIEmbeddingProvider implements EmbeddingProvider {
           return;
         }
 
-        throw error;
+        markChunkFailed(chunkTexts);
+        scheduleDiskSave(this.yamlConfig);
       }
     };
 
