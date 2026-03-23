@@ -39,9 +39,9 @@ vi.mock('../../src/config.js', () => ({
     maxRetries: 3,
     baseDelay: 500,
     maxInputChars: 32000,
-    cacheSize: 10000,
-    diskCache: true,
-    diskSaveDebounce: 5000,
+    cacheSize: process.env.MEMORIX_TEST_CACHE_SIZE ? parseInt(process.env.MEMORIX_TEST_CACHE_SIZE, 10) : 10000,
+    diskCache: process.env.MEMORIX_TEST_DISK_CACHE !== 'false',
+    diskSaveDebounce: process.env.MEMORIX_TEST_DISK_SAVE_DEBOUNCE ? parseInt(process.env.MEMORIX_TEST_DISK_SAVE_DEBOUNCE, 10) : 5000,
   }),
   getEmbeddingApiKey: () =>
     process.env.MEMORIX_EMBEDDING_API_KEY ||
@@ -112,6 +112,9 @@ describe('API Embedding Provider', () => {
     // Remove dimension override and unified key by default
     delete process.env.MEMORIX_EMBEDDING_DIMENSIONS;
     delete process.env.MEMORIX_API_KEY;
+    delete process.env.MEMORIX_TEST_CACHE_SIZE;
+    delete process.env.MEMORIX_TEST_DISK_CACHE;
+    delete process.env.MEMORIX_TEST_DISK_SAVE_DEBOUNCE;
   });
 
   afterEach(() => {
@@ -361,6 +364,37 @@ describe('API Embedding Provider', () => {
       const secondRetryBody = JSON.parse(mockFetch.mock.calls[3][1].body);
       expect(firstRetryBody.input).toEqual(['split-a', 'split-b']);
       expect(secondRetryBody.input).toEqual(['split-c', 'split-d']);
+    });
+
+    it('should preserve disk cache entries beyond in-memory cache size', async () => {
+      process.env.MEMORIX_TEST_CACHE_SIZE = '1';
+      process.env.MEMORIX_TEST_DISK_SAVE_DEBOUNCE = '0';
+
+      const existingHash = textHash('persisted-old');
+      const existingVec = makeVector(1536, 0.01);
+      fsMocks.readFile.mockImplementation(async (path: string) => {
+        if (path.endsWith('.embedding-api-cache.json')) {
+          return JSON.stringify([[existingHash, existingVec]]);
+        }
+        throw new Error('no cache');
+      });
+
+      const probeVec = makeVector(1536);
+      mockFetch.mockResolvedValueOnce(mockEmbeddingResponse([probeVec]));
+      const provider = await APIEmbeddingProvider.create();
+
+      const newVec = makeVector(1536, 0.5);
+      mockFetch.mockResolvedValueOnce(mockEmbeddingResponse([newVec]));
+      await provider.embed('new-entry');
+
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const cacheWrite = fsMocks.writeFile.mock.calls.find(([path]) => String(path).endsWith('.embedding-api-cache.json'));
+      expect(cacheWrite).toBeTruthy();
+
+      const persistedEntries = JSON.parse(String(cacheWrite![1])) as [string, number[]][];
+      expect(persistedEntries.map(([hash]) => hash)).toContain(existingHash);
+      expect(persistedEntries.map(([hash]) => hash)).toContain(textHash('new-entry'));
     });
   });
 

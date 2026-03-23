@@ -61,7 +61,16 @@ async function saveDiskCacheNow(): Promise<void> {
   if (!diskCacheDirty) return;
   try {
     await mkdir(CACHE_DIR, { recursive: true });
-    await writeFile(CACHE_FILE, JSON.stringify(Array.from(cache.entries())));
+    const diskEntries = new Map<string, number[]>();
+    try {
+      const raw = await readFile(CACHE_FILE, 'utf-8');
+      const entries: [string, number[]][] = JSON.parse(raw);
+      for (const [k, v] of entries) diskEntries.set(k, v);
+    } catch {
+      // No existing cache file or corrupt cache; rewrite from current cache only.
+    }
+    for (const [k, v] of cache.entries()) diskEntries.set(k, v);
+    await writeFile(CACHE_FILE, JSON.stringify(Array.from(diskEntries.entries())));
     await writeFile(FAILURE_FILE, JSON.stringify(Array.from(failures.entries())));
     diskCacheDirty = false;
   } catch {
