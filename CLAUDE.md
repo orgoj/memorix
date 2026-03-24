@@ -77,6 +77,20 @@ Best practices:
 5. Prefer concise reusable summaries over raw transcripts.
 6. Store milestones such as releases, published versions, and important merges.
 
+## Background Server Management
+
+Use `memorix background` to control the HTTP server:
+
+```bash
+memorix background start     # Start serve-http in background
+memorix background stop      # Stop background server
+memorix background status    # Check server status
+memorix background restart   # Restart after code changes
+memorix background logs      # View recent logs
+```
+
+After rebuilding Memorix, always restart: `memorix background restart`
+
 ## Tool Guide
 
 ### Core retrieval

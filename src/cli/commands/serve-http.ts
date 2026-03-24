@@ -347,7 +347,14 @@ export default defineCommand({
         return;
       }
 
-      if (!sessionId && isInitializeRequest(body)) {
+      if (isInitializeRequest(body)) {
+        // New session (or reconnection after session expiry)
+        // If client sent an expired/invalid sessionId, log it and create fresh session
+        if (sessionId && !sessions.has(sessionId)) {
+          console.error(
+            `[memorix] Session ${sessionId.slice(0, 8)}… expired/invalid, reinitializing`,
+          );
+        }
         // New session — create transport + server
         let createdState: SessionState | null = null;
         const transport = new StreamableHTTPServerTransport({
