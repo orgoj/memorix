@@ -15,72 +15,83 @@
  *   { "transport": "http", "url": "http://localhost:3211/mcp" }
  */
 
-import { defineCommand } from 'citty';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import { defineCommand } from "citty";
+import type { IncomingMessage, ServerResponse } from "node:http";
 
 export default defineCommand({
   meta: {
-    name: 'serve-http',
-    description: 'Start Memorix MCP Server on HTTP transport (multi-agent)',
+    name: "serve-http",
+    description: "Start Memorix MCP Server on HTTP transport (multi-agent)",
   },
   args: {
     port: {
-      type: 'string',
-      description: 'HTTP port to listen on (default: 3211)',
+      type: "string",
+      description: "HTTP port to listen on (default: 3211)",
       required: false,
     },
     cwd: {
-      type: 'string',
-      description: 'Project working directory (defaults to process.cwd())',
+      type: "string",
+      description: "Project working directory (defaults to process.cwd())",
       required: false,
     },
   },
   run: async ({ args }) => {
-    const { createServer } = await import('node:http');
-    const { randomUUID } = await import('node:crypto');
-    const { StreamableHTTPServerTransport } = await import(
-      '@modelcontextprotocol/sdk/server/streamableHttp.js'
-    );
-    const { isInitializeRequest } = await import(
-      '@modelcontextprotocol/sdk/types.js'
-    );
-    const { createMemorixServer } = await import('../../server.js');
-    const { findGitInSubdirs, detectProjectWithDiagnostics } = await import('../../project/detector.js');
-    const { existsSync, readFileSync } = await import('node:fs');
-    const { homedir } = await import('node:os');
-    const earlyPath = await import('node:path');
+    const { createServer } = await import("node:http");
+    const { randomUUID } = await import("node:crypto");
+    const { StreamableHTTPServerTransport } =
+      await import("@modelcontextprotocol/sdk/server/streamableHttp.js");
+    const { isInitializeRequest } =
+      await import("@modelcontextprotocol/sdk/types.js");
+    const { createMemorixServer } = await import("../../server.js");
+    const { findGitInSubdirs, detectProjectWithDiagnostics } =
+      await import("../../project/detector.js");
+    const { existsSync, readFileSync } = await import("node:fs");
+    const { homedir } = await import("node:os");
+    const earlyPath = await import("node:path");
 
-    const port = parseInt(args.port || '3211', 10);
+    const port = parseInt(args.port || "3211", 10);
 
     // Priority: explicit --cwd arg > MEMORIX_PROJECT_ROOT env > last-project-root fallback > process.cwd()
     let safeCwd: string;
-    try { safeCwd = process.cwd(); } catch { safeCwd = homedir(); }
+    try {
+      safeCwd = process.cwd();
+    } catch {
+      safeCwd = homedir();
+    }
     let projectRoot = args.cwd || process.env.MEMORIX_PROJECT_ROOT || safeCwd;
 
     // Fallback: if projectRoot has no git, try last-project-root
-    const lastRootFile = earlyPath.join(homedir(), '.memorix', 'last-project-root');
+    const lastRootFile = earlyPath.join(
+      homedir(),
+      ".memorix",
+      "last-project-root",
+    );
     const initialCheck = detectProjectWithDiagnostics(projectRoot);
     if (!initialCheck.project && existsSync(lastRootFile)) {
       try {
-        const lastRoot = readFileSync(lastRootFile, 'utf-8').trim();
+        const lastRoot = readFileSync(lastRootFile, "utf-8").trim();
         if (lastRoot && existsSync(lastRoot)) {
           const lastCheck = detectProjectWithDiagnostics(lastRoot);
           if (lastCheck.project) {
-            console.error(`[memorix] No git at "${projectRoot}", restored last known project: ${lastRoot}`);
+            console.error(
+              `[memorix] No git at "${projectRoot}", restored last known project: ${lastRoot}`,
+            );
             projectRoot = lastRoot;
           }
         }
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
 
     console.error(`[memorix] HTTP transport starting on port ${port}`);
     console.error(`[memorix] Project root: ${projectRoot}`);
 
     // Create shared team instances ONCE — all sessions share the same state
-    const { AgentRegistry } = await import('../../team/registry.js');
-    const { MessageBus } = await import('../../team/messages.js');
-    const { FileLockRegistry } = await import('../../team/file-locks.js');
-    const { TaskManager } = await import('../../team/tasks.js');
+    const { AgentRegistry } = await import("../../team/registry.js");
+    const { MessageBus } = await import("../../team/messages.js");
+    const { FileLockRegistry } = await import("../../team/file-locks.js");
+    const { TaskManager } = await import("../../team/tasks.js");
     const teamRegistry = new AgentRegistry();
     const sharedTeam = {
       registry: teamRegistry,
@@ -91,9 +102,13 @@ export default defineCommand({
 
     type SessionState = {
       transport: InstanceType<typeof StreamableHTTPServerTransport>;
-      server: Awaited<ReturnType<typeof createMemorixServer>>['server'];
-      switchProject: Awaited<ReturnType<typeof createMemorixServer>>['switchProject'];
-      isExplicitlyBound: Awaited<ReturnType<typeof createMemorixServer>>['isExplicitlyBound'];
+      server: Awaited<ReturnType<typeof createMemorixServer>>["server"];
+      switchProject: Awaited<
+        ReturnType<typeof createMemorixServer>
+      >["switchProject"];
+      isExplicitlyBound: Awaited<
+        ReturnType<typeof createMemorixServer>
+      >["isExplicitlyBound"];
     };
 
     // Session map: sessionId → transport + per-session server state
@@ -110,8 +125,13 @@ export default defineCommand({
     const pendingLogTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
     function maybeProbeSummary() {
-      if (suppressedProbeCount > 0 && Date.now() - lastProbeSummaryTime > PROBE_SUMMARY_INTERVAL_MS) {
-        console.error(`[memorix] ${suppressedProbeCount} probe connection(s) suppressed (short-lived / unresolved)`);
+      if (
+        suppressedProbeCount > 0 &&
+        Date.now() - lastProbeSummaryTime > PROBE_SUMMARY_INTERVAL_MS
+      ) {
+        console.error(
+          `[memorix] ${suppressedProbeCount} probe connection(s) suppressed (short-lived / unresolved)`,
+        );
         suppressedProbeCount = 0;
         lastProbeSummaryTime = Date.now();
       }
@@ -123,16 +143,16 @@ export default defineCommand({
     function parseBody(req: IncomingMessage): Promise<unknown> {
       return new Promise((resolve, reject) => {
         const chunks: Buffer[] = [];
-        req.on('data', (chunk: Buffer) => chunks.push(chunk));
-        req.on('end', () => {
+        req.on("data", (chunk: Buffer) => chunks.push(chunk));
+        req.on("end", () => {
           try {
-            const body = Buffer.concat(chunks).toString('utf-8');
+            const body = Buffer.concat(chunks).toString("utf-8");
             resolve(body ? JSON.parse(body) : undefined);
           } catch (err) {
             reject(err);
           }
         });
-        req.on('error', reject);
+        req.on("error", reject);
       });
     }
 
@@ -159,11 +179,18 @@ export default defineCommand({
       let deferredWriteHeadArgs: [number, ...any[]] | null = null;
       let bufferedChunks: Buffer[] = [];
 
-      (res as any).writeHead = function (statusCode: number, ...rest: any[]): ServerResponse {
+      (res as any).writeHead = function (
+        statusCode: number,
+        ...rest: any[]
+      ): ServerResponse {
         // Locate headers object in overloaded writeHead(status, headers) or writeHead(status, msg, headers)
         let headers: Record<string, any> | undefined;
         for (let i = rest.length - 1; i >= 0; i--) {
-          if (rest[i] && typeof rest[i] === 'object' && !Array.isArray(rest[i])) {
+          if (
+            rest[i] &&
+            typeof rest[i] === "object" &&
+            !Array.isArray(rest[i])
+          ) {
             headers = rest[i];
             break;
           }
@@ -172,22 +199,25 @@ export default defineCommand({
         // Fix 1: Empty-body responses (202/204) — set Content-Length: 0, remove chunked
         if (statusCode === 202 || statusCode === 204) {
           if (headers) {
-            headers['content-length'] = '0';
-            delete headers['transfer-encoding'];
+            headers["content-length"] = "0";
+            delete headers["transfer-encoding"];
           }
-          this.setHeader('content-length', '0');
-          this.removeHeader('transfer-encoding');
+          this.setHeader("content-length", "0");
+          this.removeHeader("transfer-encoding");
           return origWriteHead.apply(this, [statusCode, ...rest] as any);
         }
 
         // Fix 2: SSE responses — must NOT have Content-Length (forces chunked streaming)
-        const ct = headers?.['content-type'] ?? headers?.['Content-Type'] ?? this.getHeader('content-type');
-        if (typeof ct === 'string' && ct.includes('text/event-stream')) {
+        const ct =
+          headers?.["content-type"] ??
+          headers?.["Content-Type"] ??
+          this.getHeader("content-type");
+        if (typeof ct === "string" && ct.includes("text/event-stream")) {
           if (headers) {
-            delete headers['content-length'];
-            delete headers['Content-Length'];
+            delete headers["content-length"];
+            delete headers["Content-Length"];
           }
-          this.removeHeader('content-length');
+          this.removeHeader("content-length");
           return origWriteHead.apply(this, [statusCode, ...rest] as any);
         }
 
@@ -196,7 +226,7 @@ export default defineCommand({
         // Without buffering, chunked Transfer-Encoding is used (no Content-Length),
         // which rmcp/reqwest fails to decode. We accumulate chunks and flush
         // everything atomically in end() with byte-accurate Content-Length.
-        if (typeof ct === 'string' && ct.includes('application/json')) {
+        if (typeof ct === "string" && ct.includes("application/json")) {
           isJsonResponse = true;
           deferredWriteHeadArgs = [statusCode, ...rest];
           return this; // defer — flushed in end()
@@ -209,37 +239,48 @@ export default defineCommand({
       (res as any).write = function (chunk: any, ...args: any[]): boolean {
         if (isJsonResponse) {
           if (chunk != null) {
-            bufferedChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+            bufferedChunks.push(
+              Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk),
+            );
           }
           // Call the callback if provided (write(chunk, encoding, cb) or write(chunk, cb))
           const cb = args.length > 0 ? args[args.length - 1] : undefined;
-          if (typeof cb === 'function') cb();
+          if (typeof cb === "function") cb();
           return true;
         }
         return origWrite.apply(this, [chunk, ...args] as any);
       };
 
       // Flush buffered JSON body with correct Content-Length
-      (res as any).end = function (chunk?: any, ...args: any[]): ServerResponse {
+      (res as any).end = function (
+        chunk?: any,
+        ...args: any[]
+      ): ServerResponse {
         if (isJsonResponse && deferredWriteHeadArgs) {
           // Collect final chunk
-          if (chunk != null && typeof chunk !== 'function') {
-            bufferedChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+          if (chunk != null && typeof chunk !== "function") {
+            bufferedChunks.push(
+              Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)),
+            );
           }
           const body = Buffer.concat(bufferedChunks);
 
           // Set byte-accurate Content-Length in writeHead headers
           const [status, ...whRest] = deferredWriteHeadArgs;
           for (let i = whRest.length - 1; i >= 0; i--) {
-            if (whRest[i] && typeof whRest[i] === 'object' && !Array.isArray(whRest[i])) {
-              whRest[i]['content-length'] = String(body.length);
-              delete whRest[i]['Content-Length'];
-              delete whRest[i]['transfer-encoding'];
+            if (
+              whRest[i] &&
+              typeof whRest[i] === "object" &&
+              !Array.isArray(whRest[i])
+            ) {
+              whRest[i]["content-length"] = String(body.length);
+              delete whRest[i]["Content-Length"];
+              delete whRest[i]["transfer-encoding"];
               break;
             }
           }
-          this.setHeader('content-length', String(body.length));
-          this.removeHeader('transfer-encoding');
+          this.setHeader("content-length", String(body.length));
+          this.removeHeader("transfer-encoding");
 
           // Flush atomically: writeHead then end(body)
           origWriteHead.apply(this, [status, ...whRest] as any);
@@ -248,7 +289,11 @@ export default defineCommand({
 
           // Resolve the callback from end() args
           const cb = args.length > 0 ? args[args.length - 1] : undefined;
-          return origEnd.call(this, body, typeof cb === 'function' ? cb : undefined);
+          return origEnd.call(
+            this,
+            body,
+            typeof cb === "function" ? cb : undefined,
+          );
         }
 
         // Non-JSON: pass through
@@ -265,26 +310,33 @@ export default defineCommand({
      * Non-browser MCP clients (rmcp, Windsurf, curl) typically send no Origin
      * header at all, so they bypass CORS entirely (browser-only mechanism).
      */
-    const ALLOWED_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
+    const ALLOWED_ORIGIN_RE =
+      /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
 
     function setCorsHeaders(req: IncomingMessage, res: ServerResponse) {
-      const origin = req.headers['origin'];
+      const origin = req.headers["origin"];
       if (origin && ALLOWED_ORIGIN_RE.test(origin)) {
-        res.setHeader('Access-Control-Allow-Origin', origin);
-        res.setHeader('Vary', 'Origin');
+        res.setHeader("Access-Control-Allow-Origin", origin);
+        res.setHeader("Vary", "Origin");
       }
       // No Access-Control-Allow-Origin at all for disallowed origins —
       // browser will block the response (fail-closed).
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept, Mcp-Session-Id, Last-Event-Id');
-      res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+      res.setHeader(
+        "Access-Control-Allow-Methods",
+        "GET, POST, DELETE, OPTIONS",
+      );
+      res.setHeader(
+        "Access-Control-Allow-Headers",
+        "Content-Type, Accept, Mcp-Session-Id, Last-Event-Id",
+      );
+      res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
     }
 
     /**
      * Handle POST /mcp — JSON-RPC requests from agents
      */
     async function handlePost(req: IncomingMessage, res: ServerResponse) {
-      const sessionId = req.headers['mcp-session-id'] as string | undefined;
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
       const body = await parseBody(req);
 
       if (sessionId && sessions.has(sessionId)) {
@@ -307,7 +359,9 @@ export default defineCommand({
             // Defer log — only emit if session survives past SESSION_LOG_DELAY_MS
             const timer = setTimeout(() => {
               pendingLogTimers.delete(sid);
-              console.error(`[memorix] HTTP session active: ${sid.slice(0, 8)}…`);
+              console.error(
+                `[memorix] HTTP session active: ${sid.slice(0, 8)}…`,
+              );
             }, SESSION_LOG_DELAY_MS);
             pendingLogTimers.set(sid, timer);
           },
@@ -324,7 +378,9 @@ export default defineCommand({
               suppressedProbeCount++;
               maybeProbeSummary();
             } else if (sessions.has(sid)) {
-              console.error(`[memorix] HTTP session closed: ${sid.slice(0, 8)}…`);
+              console.error(
+                `[memorix] HTTP session closed: ${sid.slice(0, 8)}…`,
+              );
             }
             sessions.delete(sid);
             sessionLastActivity.delete(sid);
@@ -332,27 +388,29 @@ export default defineCommand({
         };
 
         // Create a fresh MCP server for this session (with shared team state)
-        const { server, switchProject, isExplicitlyBound } = await createMemorixServer(
-          projectRoot,
-          undefined,
-          sharedTeam,
-          {
+        const { server, switchProject, isExplicitlyBound } =
+          await createMemorixServer(projectRoot, undefined, sharedTeam, {
             allowUntrackedFallback: false,
             deferProjectInitUntilBound: true,
-          },
-        );
+          });
         createdState = { transport, server, switchProject, isExplicitlyBound };
         await server.connect(transport);
 
         const persistRoot = async (rootPath: string) => {
           try {
-            const { writeFileSync, mkdirSync } = await import('node:fs');
-            const pathMod = await import('node:path');
-            const { homedir } = await import('node:os');
-            const memorixDir = pathMod.join(homedir(), '.memorix');
+            const { writeFileSync, mkdirSync } = await import("node:fs");
+            const pathMod = await import("node:path");
+            const { homedir } = await import("node:os");
+            const memorixDir = pathMod.join(homedir(), ".memorix");
             mkdirSync(memorixDir, { recursive: true });
-            writeFileSync(pathMod.join(memorixDir, 'last-project-root'), rootPath, 'utf-8');
-          } catch { /* non-critical */ }
+            writeFileSync(
+              pathMod.join(memorixDir, "last-project-root"),
+              rootPath,
+              "utf-8",
+            );
+          } catch {
+            /* non-critical */
+          }
         };
 
         const tryRootsSwitch = async () => {
@@ -360,15 +418,19 @@ export default defineCommand({
             // If session was explicitly bound via projectRoot in memorix_session_start,
             // do NOT allow roots notifications to override the binding.
             if (isExplicitlyBound()) {
-              console.error(`[memorix] Session ${transport.sessionId?.slice(0, 8) ?? 'pending'} roots switch skipped: session was explicitly bound via projectRoot`);
+              console.error(
+                `[memorix] Session ${transport.sessionId?.slice(0, 8) ?? "pending"} roots switch skipped: session was explicitly bound via projectRoot`,
+              );
               return;
             }
             const { roots } = await server.server.listRoots();
             if (!roots || roots.length === 0) return;
 
             for (const root of roots) {
-              if (!root.uri.startsWith('file://')) continue;
-              let rootPath = decodeURIComponent(root.uri.replace('file://', ''));
+              if (!root.uri.startsWith("file://")) continue;
+              let rootPath = decodeURIComponent(
+                root.uri.replace("file://", ""),
+              );
               // Cross-platform: strip leading slash on Windows drive paths
               if (/^\/[A-Za-z]:/.test(rootPath)) rootPath = rootPath.slice(1);
               // Normalize to OS-native separators
@@ -376,7 +438,9 @@ export default defineCommand({
 
               const switched = await switchProject(rootPath);
               if (switched) {
-                console.error(`[memorix] Session ${transport.sessionId?.slice(0, 8) ?? 'pending'} roots switched to: ${rootPath}`);
+                console.error(
+                  `[memorix] Session ${transport.sessionId?.slice(0, 8) ?? "pending"} roots switched to: ${rootPath}`,
+                );
                 await persistRoot(rootPath);
                 return;
               }
@@ -385,7 +449,9 @@ export default defineCommand({
               if (subGit) {
                 const subSwitched = await switchProject(subGit);
                 if (subSwitched) {
-                  console.error(`[memorix] Session ${transport.sessionId?.slice(0, 8) ?? 'pending'} roots switched via subdir: ${subGit}`);
+                  console.error(
+                    `[memorix] Session ${transport.sessionId?.slice(0, 8) ?? "pending"} roots switched via subdir: ${subGit}`,
+                  );
                   await persistRoot(subGit);
                   return;
                 }
@@ -397,11 +463,17 @@ export default defineCommand({
         };
 
         try {
-          const { RootsListChangedNotificationSchema } = await import('@modelcontextprotocol/sdk/types.js');
-          server.server.setNotificationHandler(RootsListChangedNotificationSchema, async () => {
-            await tryRootsSwitch();
-          });
-        } catch { /* optional */ }
+          const { RootsListChangedNotificationSchema } =
+            await import("@modelcontextprotocol/sdk/types.js");
+          server.server.setNotificationHandler(
+            RootsListChangedNotificationSchema,
+            async () => {
+              await tryRootsSwitch();
+            },
+          );
+        } catch {
+          /* optional */
+        }
 
         patchMcpResponse(res);
         await transport.handleRequest(req, res, body);
@@ -412,22 +484,27 @@ export default defineCommand({
       }
 
       // Invalid request
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        jsonrpc: '2.0',
-        error: { code: -32000, message: 'Bad Request: No valid session ID provided' },
-        id: null,
-      }));
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          error: {
+            code: -32000,
+            message: "Bad Request: No valid session ID provided",
+          },
+          id: null,
+        }),
+      );
     }
 
     /**
      * Handle GET /mcp — SSE stream for server-initiated messages
      */
     async function handleGet(req: IncomingMessage, res: ServerResponse) {
-      const sessionId = req.headers['mcp-session-id'] as string | undefined;
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
       if (!sessionId || !sessions.has(sessionId)) {
-        res.writeHead(400, { 'Content-Type': 'text/plain' });
-        res.end('Invalid or missing session ID');
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("Invalid or missing session ID");
         return;
       }
 
@@ -438,10 +515,10 @@ export default defineCommand({
      * Handle DELETE /mcp — Session termination
      */
     async function handleDelete(req: IncomingMessage, res: ServerResponse) {
-      const sessionId = req.headers['mcp-session-id'] as string | undefined;
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
       if (!sessionId || !sessions.has(sessionId)) {
-        res.writeHead(400, { 'Content-Type': 'text/plain' });
-        res.end('Invalid or missing session ID');
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("Invalid or missing session ID");
         return;
       }
 
@@ -451,15 +528,16 @@ export default defineCommand({
     // Create HTTP server
     // ── Dashboard embedding ────────────────────────────────────────
     // Serve dashboard alongside MCP so Team panel has direct access to sharedTeam
-    const { detectProject } = await import('../../project/detector.js');
-    const { getProjectDataDir, getBaseDataDir } = await import('../../store/persistence.js');
-    const { promises: fsPromises } = await import('node:fs');
-    const pathModule = await import('node:path');
-    const { fileURLToPath } = await import('node:url');
+    const { detectProject } = await import("../../project/detector.js");
+    const { getProjectDataDir, getBaseDataDir } =
+      await import("../../store/persistence.js");
+    const { promises: fsPromises } = await import("node:fs");
+    const pathModule = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
 
     const detectedDashboardProject = detectProject(projectRoot);
     const defaultProject = detectedDashboardProject ?? {
-      id: '__unresolved__',
+      id: "__unresolved__",
       name: pathModule.default.basename(projectRoot),
       rootPath: projectRoot,
     };
@@ -476,9 +554,13 @@ export default defineCommand({
       projectName: string;
       dataDir: string;
     }> {
-      const requestedId = url.searchParams.get('project');
+      const requestedId = url.searchParams.get("project");
       if (!requestedId || requestedId === defaultProject.id) {
-        return { projectId: defaultProject.id, projectName: defaultProject.name, dataDir: defaultDataDir };
+        return {
+          projectId: defaultProject.id,
+          projectName: defaultProject.name,
+          dataDir: defaultDataDir,
+        };
       }
       // Resolve data dir for the requested project (cached)
       let dataDir = projectDataDirCache.get(requestedId);
@@ -486,55 +568,66 @@ export default defineCommand({
         dataDir = await getProjectDataDir(requestedId);
         projectDataDirCache.set(requestedId, dataDir);
       }
-      const name = requestedId.split('/').pop() || requestedId;
+      const name = requestedId.split("/").pop() || requestedId;
       return { projectId: requestedId, projectName: name, dataDir };
     }
 
     // Resolve static directory (dist/dashboard/static)
     const cliDir = pathModule.default.dirname(fileURLToPath(import.meta.url));
-    const dashStaticDir = pathModule.default.join(cliDir, '..', 'dashboard', 'static');
+    const dashStaticDir = pathModule.default.join(
+      cliDir,
+      "..",
+      "dashboard",
+      "static",
+    );
 
     const MIME_TYPES: Record<string, string> = {
-      '.html': 'text/html; charset=utf-8',
-      '.css': 'text/css; charset=utf-8',
-      '.js': 'application/javascript; charset=utf-8',
-      '.json': 'application/json; charset=utf-8',
-      '.svg': 'image/svg+xml',
-      '.png': 'image/png',
-      '.ico': 'image/x-icon',
+      ".html": "text/html; charset=utf-8",
+      ".css": "text/css; charset=utf-8",
+      ".js": "application/javascript; charset=utf-8",
+      ".json": "application/json; charset=utf-8",
+      ".svg": "image/svg+xml",
+      ".png": "image/png",
+      ".ico": "image/x-icon",
     };
 
     /** Serve dashboard static files */
     async function serveDashStatic(req: IncomingMessage, res: ServerResponse) {
-      let urlPath = new URL(req.url || '/', `http://localhost:${port}`).pathname;
-      if (urlPath === '/' || !urlPath.includes('.')) urlPath = '/index.html';
+      let urlPath = new URL(req.url || "/", `http://localhost:${port}`)
+        .pathname;
+      if (urlPath === "/" || !urlPath.includes(".")) urlPath = "/index.html";
       const filePath = pathModule.default.join(dashStaticDir, urlPath);
       if (!filePath.startsWith(dashStaticDir)) {
-        res.writeHead(403); res.end('Forbidden'); return;
+        res.writeHead(403);
+        res.end("Forbidden");
+        return;
       }
       try {
         const data = await fsPromises.readFile(filePath);
         const ext = pathModule.default.extname(filePath);
         res.writeHead(200, {
-          'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
-          'Cache-Control': 'no-cache',
+          "Content-Type": MIME_TYPES[ext] || "application/octet-stream",
+          "Cache-Control": "no-cache",
         });
         res.end(data);
       } catch {
         try {
-          const idx = await fsPromises.readFile(pathModule.default.join(dashStaticDir, 'index.html'));
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          const idx = await fsPromises.readFile(
+            pathModule.default.join(dashStaticDir, "index.html"),
+          );
+          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
           res.end(idx);
         } catch {
-          res.writeHead(404); res.end('Not found');
+          res.writeHead(404);
+          res.end("Not found");
         }
       }
     }
 
     /** Handle dashboard API routes */
     async function handleDashApi(req: IncomingMessage, res: ServerResponse) {
-      const url = new URL(req.url || '/', `http://localhost:${port}`);
-      const apiPath = url.pathname.replace('/api', '');
+      const url = new URL(req.url || "/", `http://localhost:${port}`);
+      const apiPath = url.pathname.replace("/api", "");
       const sendJson = (data: unknown, status = 200) => {
         // CORS headers are already set by setCorsHeaders() in the main handler —
         // do NOT override with wildcard '*' here (security: localhost-only policy).
@@ -543,11 +636,11 @@ export default defineCommand({
       };
 
       try {
-        if (apiPath === '/team') {
+        if (apiPath === "/team") {
           // Team API supports ?scope=project (default) or ?scope=global
           // Project scope: only runtime agents from this control-plane process
           // Global scope: runtime + persisted agents from team-state.json
-          const teamScope = url.searchParams.get('scope') || 'project';
+          const teamScope = url.searchParams.get("scope") || "project";
 
           sharedTeam.fileLocks.cleanExpired();
           const runtimeAgents = sharedTeam.registry.listAgents();
@@ -560,8 +653,11 @@ export default defineCommand({
           let fileTasks: any[] = [];
           try {
             const { dataDir: teamDataDir } = await resolveRequestProject(url);
-            const teamStatePath = pathModule.default.join(teamDataDir, 'team-state.json');
-            const raw = await fsPromises.readFile(teamStatePath, 'utf8');
+            const teamStatePath = pathModule.default.join(
+              teamDataDir,
+              "team-state.json",
+            );
+            const raw = await fsPromises.readFile(teamStatePath, "utf8");
             const snap = JSON.parse(raw);
             if (snap.version === 1 && snap.registry?.agents) {
               const httpAgentIds = new Set(runtimeAgents.map((a: any) => a.id));
@@ -575,11 +671,16 @@ export default defineCommand({
             }
             if (snap.taskManager?.tasks) {
               const rawTasks = snap.taskManager.tasks;
-              fileTasks = Array.isArray(rawTasks) ? rawTasks : Object.values(rawTasks);
+              fileTasks = Array.isArray(rawTasks)
+                ? rawTasks
+                : Object.values(rawTasks);
             }
           } catch (err) {
-            if (err && (err as any).code !== 'ENOENT') {
-              console.error('[memorix] Warning: failed to merge team-state.json:', (err as Error).message);
+            if (err && (err as any).code !== "ENOENT") {
+              console.error(
+                "[memorix] Warning: failed to merge team-state.json:",
+                (err as Error).message,
+              );
             }
           }
 
@@ -588,22 +689,35 @@ export default defineCommand({
             ...runtimeAgents.map((a: any) => ({
               ...a,
               unread: sharedTeam.messageBus.getUnreadCount(a.id),
-              transport: 'http',
-              source: 'runtime',
+              transport: "http",
+              source: "runtime",
             })),
-            ...fileAgents.map((a: any) => ({ ...a, transport: 'stdio', source: 'persisted' })),
+            ...fileAgents.map((a: any) => ({
+              ...a,
+              transport: "stdio",
+              source: "persisted",
+            })),
           ];
-          const allTasks = [...runtimeTasks, ...fileTasks.filter((ft: any) => !runtimeTasks.some((t: any) => t.id === ft.id))];
+          const allTasks = [
+            ...runtimeTasks,
+            ...fileTasks.filter(
+              (ft: any) => !runtimeTasks.some((t: any) => t.id === ft.id),
+            ),
+          ];
 
           // Project scope: only runtime agents + runtime tasks (current control-plane)
           // Global scope: everything (runtime + persisted)
-          const scopedAgents = teamScope === 'global' ? allAgents : allAgents.filter((a: any) => a.source === 'runtime');
-          const scopedTasks = teamScope === 'global' ? allTasks : runtimeTasks;
+          const scopedAgents =
+            teamScope === "global"
+              ? allAgents
+              : allAgents.filter((a: any) => a.source === "runtime");
+          const scopedTasks = teamScope === "global" ? allTasks : runtimeTasks;
 
           sendJson({
             scope: teamScope,
             agents: scopedAgents,
-            activeCount: scopedAgents.filter((a: any) => a.status === 'active').length,
+            activeCount: scopedAgents.filter((a: any) => a.status === "active")
+              .length,
             locks,
             tasks: scopedTasks,
             availableTasks: available.length,
@@ -618,17 +732,20 @@ export default defineCommand({
           return;
         }
 
-        if (apiPath === '/project') {
-          const { projectId: pid, projectName: pname } = await resolveRequestProject(url);
+        if (apiPath === "/project") {
+          const { projectId: pid, projectName: pname } =
+            await resolveRequestProject(url);
           sendJson({ id: pid, name: pname });
           return;
         }
 
-        if (apiPath === '/stats') {
-          const { projectId: statsProjectId, dataDir: statsDataDir } = await resolveRequestProject(url);
-          const { loadObservationsJson, loadIdCounter, loadGraphJsonl } = await import('../../store/persistence.js');
+        if (apiPath === "/stats") {
+          const { projectId: statsProjectId, dataDir: statsDataDir } =
+            await resolveRequestProject(url);
+          const { loadObservationsJson, loadIdCounter, loadGraphJsonl } =
+            await import("../../store/persistence.js");
           const graph = await loadGraphJsonl(statsDataDir);
-          const allObs = await loadObservationsJson(statsDataDir) as Array<{
+          const allObs = (await loadObservationsJson(statsDataDir)) as Array<{
             projectId?: string;
             type?: string;
             id?: number;
@@ -642,33 +759,46 @@ export default defineCommand({
             accessCount?: number;
             status?: string;
           }>;
-          const observations = allObs.filter(o => o.projectId === statsProjectId && (o.status ?? 'active') === 'active');
+          const observations = allObs.filter(
+            (o) =>
+              o.projectId === statsProjectId &&
+              (o.status ?? "active") === "active",
+          );
           const nextId = await loadIdCounter(statsDataDir);
           const typeCounts: Record<string, number> = {};
           for (const obs of observations) {
-            const t = obs.type || 'unknown';
+            const t = obs.type || "unknown";
             typeCounts[t] = (typeCounts[t] || 0) + 1;
           }
 
-          const sourceCounts: Record<string, number> = { git: 0, agent: 0, manual: 0 };
+          const sourceCounts: Record<string, number> = {
+            git: 0,
+            agent: 0,
+            manual: 0,
+          };
           const gitMemories: typeof observations = [];
           const now = Date.now();
           const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
           let recentGitCount = 0;
 
           for (const obs of observations) {
-            const src = obs.source || 'agent';
+            const src = obs.source || "agent";
             sourceCounts[src] = (sourceCounts[src] || 0) + 1;
-            if (src === 'git') {
+            if (src === "git") {
               gitMemories.push(obs);
-              if (obs.createdAt && new Date(obs.createdAt).getTime() > sevenDaysAgo) {
+              if (
+                obs.createdAt &&
+                new Date(obs.createdAt).getTime() > sevenDaysAgo
+              ) {
                 recentGitCount++;
               }
             }
           }
 
-          const gitSorted = [...gitMemories].sort((a, b) => (b.id || 0) - (a.id || 0));
-          const recentGitMemories = gitSorted.slice(0, 8).map(o => ({
+          const gitSorted = [...gitMemories].sort(
+            (a, b) => (b.id || 0) - (a.id || 0),
+          );
+          const recentGitMemories = gitSorted.slice(0, 8).map((o) => ({
             id: o.id,
             title: o.title,
             type: o.type,
@@ -685,52 +815,78 @@ export default defineCommand({
             const importance = obs.importance ?? 5;
             const accessCount = obs.accessCount ?? 0;
             const lambda = 0.01;
-            const score = Math.min(importance * Math.exp(-lambda * ageHours) + Math.min(accessCount * 0.5, 3), 10);
-            const isImmune = importance >= 8 || obs.type === 'gotcha' || obs.type === 'decision';
+            const score = Math.min(
+              importance * Math.exp(-lambda * ageHours) +
+                Math.min(accessCount * 0.5, 3),
+              10,
+            );
+            const isImmune =
+              importance >= 8 ||
+              obs.type === "gotcha" ||
+              obs.type === "decision";
             if (isImmune) retentionSummary.immune++;
             if (score >= 3) retentionSummary.active++;
             else if (score >= 1) retentionSummary.stale++;
             else retentionSummary.archive++;
           }
 
-          const sorted = [...observations].sort((a, b) => (b.id || 0) - (a.id || 0)).slice(0, 10);
+          const sorted = [...observations]
+            .sort((a, b) => (b.id || 0) - (a.id || 0))
+            .slice(0, 10);
 
-          let embeddingStatus = { enabled: false, provider: '', dimensions: 0 };
+          let embeddingStatus = { enabled: false, provider: "", dimensions: 0 };
           try {
-            const { getEmbeddingProvider } = await import('../../embedding/provider.js');
+            const { getEmbeddingProvider } =
+              await import("../../embedding/provider.js");
             const embProvider = await getEmbeddingProvider();
             embeddingStatus = {
               enabled: embProvider !== null,
-              provider: embProvider?.name || '',
+              provider: embProvider?.name || "",
               dimensions: embProvider?.dimensions || 0,
             };
-          } catch { /* best effort */ }
+          } catch {
+            /* best effort */
+          }
 
-          let vectorStatus = { total: 0, missing: 0, missingIds: [] as number[], backfillRunning: false };
+          let vectorStatus = {
+            total: 0,
+            missing: 0,
+            missingIds: [] as number[],
+            backfillRunning: false,
+          };
           try {
-            const { getVectorStatus } = await import('../../memory/observations.js');
+            const { getVectorStatus } =
+              await import("../../memory/observations.js");
             vectorStatus = getVectorStatus();
-          } catch { /* best effort */ }
+          } catch {
+            /* best effort */
+          }
 
           // Real search mode from the last actual search execution
-          let searchMode = 'fulltext';
+          let searchMode = "fulltext";
           try {
             const { getLastSearchMode } = await import('../../store/orama-store.js');
             searchMode = getLastSearchMode(statsProjectId);
           } catch { /* best effort */ }
 
           // Embedding provider state: disabled / temporarily_unavailable / ready
-          let embeddingProviderState: 'disabled' | 'temporarily_unavailable' | 'ready' = 'disabled';
+          let embeddingProviderState:
+            | "disabled"
+            | "temporarily_unavailable"
+            | "ready" = "disabled";
           try {
-            const { isEmbeddingExplicitlyDisabled } = await import('../../embedding/provider.js');
+            const { isEmbeddingExplicitlyDisabled } =
+              await import("../../embedding/provider.js");
             if (isEmbeddingExplicitlyDisabled()) {
-              embeddingProviderState = 'disabled';
+              embeddingProviderState = "disabled";
             } else if (embeddingStatus.enabled) {
-              embeddingProviderState = 'ready';
+              embeddingProviderState = "ready";
             } else {
-              embeddingProviderState = 'temporarily_unavailable';
+              embeddingProviderState = "temporarily_unavailable";
             }
-          } catch { /* best effort */ }
+          } catch {
+            /* best effort */
+          }
 
           sendJson({
             entities: graph.entities.length,
@@ -754,50 +910,97 @@ export default defineCommand({
           return;
         }
 
-        if (apiPath === '/observations') {
-          const { projectId: obsProjectId, dataDir: obsDataDir } = await resolveRequestProject(url);
-          const { loadObservationsJson } = await import('../../store/persistence.js');
-          const allObs = await loadObservationsJson(obsDataDir) as Array<{ projectId?: string; status?: string }>;
-          sendJson(allObs.filter(o => o.projectId === obsProjectId && (o.status ?? 'active') === 'active'));
+        if (apiPath === "/observations") {
+          const { projectId: obsProjectId, dataDir: obsDataDir } =
+            await resolveRequestProject(url);
+          const { loadObservationsJson } =
+            await import("../../store/persistence.js");
+          const allObs = (await loadObservationsJson(obsDataDir)) as Array<{
+            projectId?: string;
+            status?: string;
+          }>;
+          sendJson(
+            allObs.filter(
+              (o) =>
+                o.projectId === obsProjectId &&
+                (o.status ?? "active") === "active",
+            ),
+          );
           return;
         }
 
-        if (apiPath === '/graph') {
-          const { projectId: graphProjectId, dataDir: graphDataDir } = await resolveRequestProject(url);
-          const { loadGraphJsonl, loadObservationsJson } = await import('../../store/persistence.js');
+        if (apiPath === "/graph") {
+          const { projectId: graphProjectId, dataDir: graphDataDir } =
+            await resolveRequestProject(url);
+          const { loadGraphJsonl, loadObservationsJson } =
+            await import("../../store/persistence.js");
           const fullGraph = await loadGraphJsonl(graphDataDir);
 
           // Project-scope the graph: only include entities that have observations in this project
-          const allObs = await loadObservationsJson(graphDataDir) as Array<{ projectId?: string; entityName?: string; status?: string }>;
+          const allObs = (await loadObservationsJson(graphDataDir)) as Array<{
+            projectId?: string;
+            entityName?: string;
+            status?: string;
+          }>;
           const projectEntityNames = new Set(
             allObs
-              .filter(o => o.projectId === graphProjectId && (o.status ?? 'active') === 'active' && o.entityName)
-              .map(o => o.entityName!)
+              .filter(
+                (o) =>
+                  o.projectId === graphProjectId &&
+                  (o.status ?? "active") === "active" &&
+                  o.entityName,
+              )
+              .map((o) => o.entityName!),
           );
 
-          const entities = fullGraph.entities.filter(e => projectEntityNames.has(e.name));
-          const entityNameSet = new Set(entities.map(e => e.name));
-          const relations = fullGraph.relations.filter(r => entityNameSet.has(r.from) && entityNameSet.has(r.to));
+          const entities = fullGraph.entities.filter((e) =>
+            projectEntityNames.has(e.name),
+          );
+          const entityNameSet = new Set(entities.map((e) => e.name));
+          const relations = fullGraph.relations.filter(
+            (r) => entityNameSet.has(r.from) && entityNameSet.has(r.to),
+          );
 
           sendJson({ entities, relations });
           return;
         }
 
-        if (apiPath === '/sessions') {
-          const { projectId: sessProjectId, dataDir: sessDataDir } = await resolveRequestProject(url);
-          const { loadSessionsJson } = await import('../../store/persistence.js');
-          const allSessions = await loadSessionsJson(sessDataDir) as Array<{ projectId?: string }>;
-          sendJson(allSessions.filter(s => s.projectId === sessProjectId));
+        if (apiPath === "/sessions") {
+          const { projectId: sessProjectId, dataDir: sessDataDir } =
+            await resolveRequestProject(url);
+          const { loadSessionsJson } =
+            await import("../../store/persistence.js");
+          const allSessions = (await loadSessionsJson(sessDataDir)) as Array<{
+            projectId?: string;
+          }>;
+          sendJson(allSessions.filter((s) => s.projectId === sessProjectId));
           return;
         }
 
-        if (apiPath === '/retention') {
-          const { projectId: retProjectId, dataDir: retDataDir } = await resolveRequestProject(url);
-          const { loadObservationsJson } = await import('../../store/persistence.js');
-          const allObs = await loadObservationsJson(retDataDir) as Array<{ projectId?: string; id?: number; title?: string; type?: string; importance?: number; accessCount?: number; lastAccessedAt?: string; createdAt?: string; entityName?: string; status?: string }>;
-          const observations = allObs.filter(o => o.projectId === retProjectId && (o.status ?? 'active') === 'active');
+        if (apiPath === "/retention") {
+          const { projectId: retProjectId, dataDir: retDataDir } =
+            await resolveRequestProject(url);
+          const { loadObservationsJson } =
+            await import("../../store/persistence.js");
+          const allObs = (await loadObservationsJson(retDataDir)) as Array<{
+            projectId?: string;
+            id?: number;
+            title?: string;
+            type?: string;
+            importance?: number;
+            accessCount?: number;
+            lastAccessedAt?: string;
+            createdAt?: string;
+            entityName?: string;
+            status?: string;
+          }>;
+          const observations = allObs.filter(
+            (o) =>
+              o.projectId === retProjectId &&
+              (o.status ?? "active") === "active",
+          );
           const now = Date.now();
-          const scored = observations.map(obs => {
+          const scored = observations.map((obs) => {
             const age = now - new Date(obs.createdAt || now).getTime();
             const ageHours = age / (1000 * 60 * 60);
             const importance = obs.importance ?? 5;
@@ -806,25 +1009,50 @@ export default defineCommand({
             const decayScore = importance * Math.exp(-lambda * ageHours);
             const accessBonus = Math.min(accessCount * 0.5, 3);
             const score = Math.min(decayScore + accessBonus, 10);
-            const isImmune = importance >= 8 || obs.type === 'gotcha' || obs.type === 'decision';
-            return { id: obs.id, title: obs.title, type: obs.type, entityName: obs.entityName, score: Math.round(score * 100) / 100, isImmune, ageHours: Math.round(ageHours * 10) / 10, accessCount };
+            const isImmune =
+              importance >= 8 ||
+              obs.type === "gotcha" ||
+              obs.type === "decision";
+            return {
+              id: obs.id,
+              title: obs.title,
+              type: obs.type,
+              entityName: obs.entityName,
+              score: Math.round(score * 100) / 100,
+              isImmune,
+              ageHours: Math.round(ageHours * 10) / 10,
+              accessCount,
+            };
           });
           scored.sort((a, b) => b.score - a.score);
-          const activeCount = scored.filter(s => s.score >= 3).length;
-          const staleCount = scored.filter(s => s.score < 3 && s.score >= 1).length;
-          const archiveCount = scored.filter(s => s.score < 1).length;
-          const immuneCount = scored.filter(s => s.isImmune).length;
-          sendJson({ summary: { active: activeCount, stale: staleCount, archive: archiveCount, immune: immuneCount }, items: scored });
+          const activeCount = scored.filter((s) => s.score >= 3).length;
+          const staleCount = scored.filter(
+            (s) => s.score < 3 && s.score >= 1,
+          ).length;
+          const archiveCount = scored.filter((s) => s.score < 1).length;
+          const immuneCount = scored.filter((s) => s.isImmune).length;
+          sendJson({
+            summary: {
+              active: activeCount,
+              stale: staleCount,
+              archive: archiveCount,
+              immune: immuneCount,
+            },
+            items: scored,
+          });
           return;
         }
 
-        if (apiPath === '/config') {
-          const { projectId: configProjectId } = await resolveRequestProject(url);
-          const os = await import('node:os');
-          const { existsSync } = await import('node:fs');
-          const { join } = await import('node:path');
-          const { loadYamlConfig } = await import('../../config/yaml-loader.js');
-          const { loadFileConfig, loadDotenv, getLoadedEnvFiles } = await import('../../config.js');
+        if (apiPath === "/config") {
+          const { projectId: configProjectId } =
+            await resolveRequestProject(url);
+          const os = await import("node:os");
+          const { existsSync } = await import("node:fs");
+          const { join } = await import("node:path");
+          const { loadYamlConfig } =
+            await import("../../config/yaml-loader.js");
+          const { loadFileConfig, loadDotenv, getLoadedEnvFiles } =
+            await import("../../config.js");
 
           // Determine the effective project root for config resolution.
           // For the startup project, use the known projectRoot.
@@ -843,11 +1071,11 @@ export default defineCommand({
           const home = os.homedir();
           if (effectiveRoot) {
             const paths: Record<string, string> = {
-              'project memorix.yml': join(effectiveRoot, 'memorix.yml'),
-              'user memorix.yml': join(home, '.memorix', 'memorix.yml'),
-              'project .env': join(effectiveRoot, '.env'),
-              'user .env': join(home, '.memorix', '.env'),
-              'legacy config.json': join(home, '.memorix', 'config.json'),
+              "project memorix.yml": join(effectiveRoot, "memorix.yml"),
+              "user memorix.yml": join(home, ".memorix", "memorix.yml"),
+              "project .env": join(effectiveRoot, ".env"),
+              "user .env": join(home, ".memorix", ".env"),
+              "legacy config.json": join(home, ".memorix", "config.json"),
             };
             for (const [key, fpath] of Object.entries(paths)) {
               files[key] = { exists: existsSync(fpath), path: fpath };
@@ -855,32 +1083,51 @@ export default defineCommand({
           } else {
             // Non-startup project: only user-level config files are resolvable
             const userPaths: Record<string, string> = {
-              'user memorix.yml': join(home, '.memorix', 'memorix.yml'),
-              'user .env': join(home, '.memorix', '.env'),
-              'legacy config.json': join(home, '.memorix', 'config.json'),
+              "user memorix.yml": join(home, ".memorix", "memorix.yml"),
+              "user .env": join(home, ".memorix", ".env"),
+              "legacy config.json": join(home, ".memorix", "config.json"),
             };
             for (const [key, fpath] of Object.entries(userPaths)) {
               files[key] = { exists: existsSync(fpath), path: fpath };
             }
           }
 
-          const values: Array<{ key: string; value: string; source: string; sensitive?: boolean }> = [];
+          const values: Array<{
+            key: string;
+            value: string;
+            source: string;
+            sensitive?: boolean;
+          }> = [];
 
-          const llmProvider = process.env.MEMORIX_LLM_PROVIDER || yml.llm?.provider || legacy.llm?.provider;
+          const llmProvider =
+            process.env.MEMORIX_LLM_PROVIDER ||
+            yml.llm?.provider ||
+            legacy.llm?.provider;
           if (llmProvider) {
             values.push({
-              key: 'llm.provider',
+              key: "llm.provider",
               value: llmProvider,
-              source: process.env.MEMORIX_LLM_PROVIDER ? 'env' : yml.llm?.provider ? 'memorix.yml' : 'config.json',
+              source: process.env.MEMORIX_LLM_PROVIDER
+                ? "env"
+                : yml.llm?.provider
+                  ? "memorix.yml"
+                  : "config.json",
             });
           }
 
-          const llmModel = process.env.MEMORIX_LLM_MODEL || yml.llm?.model || legacy.llm?.model;
+          const llmModel =
+            process.env.MEMORIX_LLM_MODEL ||
+            yml.llm?.model ||
+            legacy.llm?.model;
           if (llmModel) {
             values.push({
-              key: 'llm.model',
+              key: "llm.model",
               value: llmModel,
-              source: process.env.MEMORIX_LLM_MODEL ? 'env' : yml.llm?.model ? 'memorix.yml' : 'config.json',
+              source: process.env.MEMORIX_LLM_MODEL
+                ? "env"
+                : yml.llm?.model
+                  ? "memorix.yml"
+                  : "config.json",
             });
           }
 
@@ -891,57 +1138,93 @@ export default defineCommand({
             legacy.llm?.apiKey ||
             process.env.OPENAI_API_KEY;
           if (llmKey) {
-            let src = 'unknown';
-            if (process.env.MEMORIX_LLM_API_KEY) src = 'env:MEMORIX_LLM_API_KEY';
-            else if (process.env.MEMORIX_API_KEY) src = 'env:MEMORIX_API_KEY';
-            else if (yml.llm?.apiKey) src = 'memorix.yml (move to .env!)';
-            else if (legacy.llm?.apiKey) src = 'config.json (legacy)';
-            else if (process.env.OPENAI_API_KEY) src = 'env:OPENAI_API_KEY';
-            values.push({ key: 'llm.apiKey', value: '****' + llmKey.slice(-4), source: src, sensitive: true });
+            let src = "unknown";
+            if (process.env.MEMORIX_LLM_API_KEY)
+              src = "env:MEMORIX_LLM_API_KEY";
+            else if (process.env.MEMORIX_API_KEY) src = "env:MEMORIX_API_KEY";
+            else if (yml.llm?.apiKey) src = "memorix.yml (move to .env!)";
+            else if (legacy.llm?.apiKey) src = "config.json (legacy)";
+            else if (process.env.OPENAI_API_KEY) src = "env:OPENAI_API_KEY";
+            values.push({
+              key: "llm.apiKey",
+              value: "****" + llmKey.slice(-4),
+              source: src,
+              sensitive: true,
+            });
           } else {
-            values.push({ key: 'llm.apiKey', value: 'not set', source: 'none' });
+            values.push({
+              key: "llm.apiKey",
+              value: "not set",
+              source: "none",
+            });
           }
 
-          const embProvider = process.env.MEMORIX_EMBEDDING || yml.embedding?.provider || legacy.embedding || 'off';
+          const embProvider =
+            process.env.MEMORIX_EMBEDDING ||
+            yml.embedding?.provider ||
+            legacy.embedding ||
+            "off";
           values.push({
-            key: 'embedding.provider',
+            key: "embedding.provider",
             value: embProvider,
-            source: process.env.MEMORIX_EMBEDDING ? 'env' : yml.embedding?.provider ? 'memorix.yml' : legacy.embedding ? 'config.json' : 'default',
+            source: process.env.MEMORIX_EMBEDDING
+              ? "env"
+              : yml.embedding?.provider
+                ? "memorix.yml"
+                : legacy.embedding
+                  ? "config.json"
+                  : "default",
           });
 
           values.push({
-            key: 'git.autoHook',
+            key: "git.autoHook",
             value: String(yml.git?.autoHook ?? false),
-            source: yml.git?.autoHook !== undefined ? 'memorix.yml' : 'default',
+            source: yml.git?.autoHook !== undefined ? "memorix.yml" : "default",
           });
           values.push({
-            key: 'git.skipMergeCommits',
+            key: "git.skipMergeCommits",
             value: String(yml.git?.skipMergeCommits ?? true),
-            source: yml.git?.skipMergeCommits !== undefined ? 'memorix.yml' : 'default',
+            source:
+              yml.git?.skipMergeCommits !== undefined
+                ? "memorix.yml"
+                : "default",
           });
 
           if (yml.behavior?.formationMode) {
-            values.push({ key: 'behavior.formationMode', value: yml.behavior.formationMode, source: 'memorix.yml' });
+            values.push({
+              key: "behavior.formationMode",
+              value: yml.behavior.formationMode,
+              source: "memorix.yml",
+            });
           }
           if (yml.behavior?.sessionInject) {
-            values.push({ key: 'behavior.sessionInject', value: yml.behavior.sessionInject, source: 'memorix.yml' });
+            values.push({
+              key: "behavior.sessionInject",
+              value: yml.behavior.sessionInject,
+              source: "memorix.yml",
+            });
           }
 
           values.push({
-            key: 'server.transport',
-            value: yml.server?.transport || 'stdio',
-            source: yml.server?.transport ? 'memorix.yml' : 'default',
+            key: "server.transport",
+            value: yml.server?.transport || "stdio",
+            source: yml.server?.transport ? "memorix.yml" : "default",
           });
           values.push({
-            key: 'server.dashboard',
+            key: "server.dashboard",
             value: String(yml.server?.dashboard ?? true),
-            source: yml.server?.dashboard !== undefined ? 'memorix.yml' : 'default',
+            source:
+              yml.server?.dashboard !== undefined ? "memorix.yml" : "default",
           });
 
           sendJson({
             projectId: configProjectId,
             isStartupProject,
-            ...(!isStartupProject ? { note: 'Project-level config (memorix.yml, .env) is only available for the startup project. Showing user-level config only.' } : {}),
+            ...(!isStartupProject
+              ? {
+                  note: "Project-level config (memorix.yml, .env) is only available for the startup project. Showing user-level config only.",
+                }
+              : {}),
             files,
             values,
             loadedEnvFiles: [...getLoadedEnvFiles()],
@@ -949,11 +1232,16 @@ export default defineCommand({
           return;
         }
 
-        if (apiPath === '/identity') {
+        if (apiPath === "/identity") {
           const { projectId: idProjectId } = await resolveRequestProject(url);
-          const { loadObservationsJson } = await import('../../store/persistence.js');
-          const allObs = await loadObservationsJson(baseDir) as Array<{ projectId?: string }>;
-          const allProjectIds = [...new Set(allObs.map(o => o.projectId).filter(Boolean))] as string[];
+          const { loadObservationsJson } =
+            await import("../../store/persistence.js");
+          const allObs = (await loadObservationsJson(baseDir)) as Array<{
+            projectId?: string;
+          }>;
+          const allProjectIds = [
+            ...new Set(allObs.map((o) => o.projectId).filter(Boolean)),
+          ] as string[];
 
           const dirtyPatterns = [
             /^placeholder\//,
@@ -963,24 +1251,35 @@ export default defineCommand({
             /\.vscode/i,
             /^local\/[A-Z]:\\/,
           ];
-          const dirtyIds = allProjectIds.filter(id => dirtyPatterns.some(p => p.test(id)));
+          const dirtyIds = allProjectIds.filter((id) =>
+            dirtyPatterns.some((p) => p.test(id)),
+          );
 
           let aliasGroups: any[] = [];
           let canonicalId = idProjectId;
           try {
-            const aliasModule = await import('../../project/aliases.js');
+            const aliasModule = await import("../../project/aliases.js");
             canonicalId = await aliasModule.getCanonicalId(idProjectId);
-            const registryPath = pathModule.default.join(baseDir, '.project-aliases.json');
-            const raw = await fsPromises.readFile(registryPath, 'utf-8');
+            const registryPath = pathModule.default.join(
+              baseDir,
+              ".project-aliases.json",
+            );
+            const raw = await fsPromises.readFile(registryPath, "utf-8");
             const registry = JSON.parse(raw);
             aliasGroups = registry.groups || [];
-          } catch { /* best effort */ }
+          } catch {
+            /* best effort */
+          }
 
-          const currentGroup = aliasGroups.find((g: any) => g.aliases?.includes(idProjectId) || g.canonical === idProjectId);
+          const currentGroup = aliasGroups.find(
+            (g: any) =>
+              g.aliases?.includes(idProjectId) || g.canonical === idProjectId,
+          );
           const aliases = currentGroup?.aliases || [idProjectId];
 
           const hasDirtyIds = dirtyIds.length > 0;
-          const hasMultipleUnmerged = allProjectIds.length > aliasGroups.length + 1;
+          const hasMultipleUnmerged =
+            allProjectIds.length > aliasGroups.length + 1;
           const isHealthy = !hasDirtyIds && !hasMultipleUnmerged;
 
           sendJson({
@@ -992,29 +1291,51 @@ export default defineCommand({
             aliasGroups: aliasGroups.length,
             isHealthy,
             healthIssues: [
-              ...(hasDirtyIds ? [`${dirtyIds.length} dirty project ID(s) detected`] : []),
-              ...(hasMultipleUnmerged ? ['Potential unmerged project identity fragments detected'] : []),
+              ...(hasDirtyIds
+                ? [`${dirtyIds.length} dirty project ID(s) detected`]
+                : []),
+              ...(hasMultipleUnmerged
+                ? ["Potential unmerged project identity fragments detected"]
+                : []),
             ],
           });
           return;
         }
 
-        if (apiPath === '/projects') {
-          const { loadObservationsJson } = await import('../../store/persistence.js');
-          const allObs = await loadObservationsJson(baseDir) as Array<{ projectId?: string; status?: string }>;
+        if (apiPath === "/projects") {
+          const { loadObservationsJson } =
+            await import("../../store/persistence.js");
+          const allObs = (await loadObservationsJson(baseDir)) as Array<{
+            projectId?: string;
+            status?: string;
+          }>;
           const projectSet = new Map<string, number>();
-          for (const obs of allObs) { if (obs.projectId && (obs.status ?? 'active') === 'active') projectSet.set(obs.projectId, (projectSet.get(obs.projectId) || 0) + 1); }
+          for (const obs of allObs) {
+            if (obs.projectId && (obs.status ?? "active") === "active")
+              projectSet.set(
+                obs.projectId,
+                (projectSet.get(obs.projectId) || 0) + 1,
+              );
+          }
           const projects = Array.from(projectSet.entries())
-            .filter(([id]) => id !== '__unresolved__')
+            .filter(([id]) => id !== "__unresolved__")
             .sort((a, b) => b[1] - a[1])
-            .map(([id, count]) => ({ id, name: id.split('/').pop() || id, count, isCurrent: id === defaultProject.id }));
+            .map(([id, count]) => ({
+              id,
+              name: id.split("/").pop() || id,
+              count,
+              isCurrent: id === defaultProject.id,
+            }));
           sendJson(projects);
           return;
         }
 
-        sendJson({ error: 'Not found' }, 404);
+        sendJson({ error: "Not found" }, 404);
       } catch (err) {
-        sendJson({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
+        sendJson(
+          { error: err instanceof Error ? err.message : "Unknown error" },
+          500,
+        );
       }
     }
 
@@ -1022,72 +1343,78 @@ export default defineCommand({
       setCorsHeaders(req, res);
 
       // Handle CORS preflight
-      if (req.method === 'OPTIONS') {
+      if (req.method === "OPTIONS") {
         res.writeHead(204);
         res.end();
         return;
       }
 
-      const url = new URL(req.url || '/', `http://localhost:${port}`);
+      const url = new URL(req.url || "/", `http://localhost:${port}`);
 
       // MCP endpoint
-      if (url.pathname === '/mcp') {
+      if (url.pathname === "/mcp") {
         // Ensure Accept header includes both application/json and text/event-stream.
         // Some MCP clients (e.g. rmcp) omit text/event-stream, causing the SDK's
         // StreamableHTTPServerTransport to reject with 406 Not Acceptable.
         // Hono's node-server reads rawHeaders (not req.headers), so we must patch both.
-        const accept = req.headers['accept'] || '';
+        const accept = req.headers["accept"] || "";
         const needs: string[] = [];
-        if (!accept.includes('application/json')) needs.push('application/json');
-        if (!accept.includes('text/event-stream')) needs.push('text/event-stream');
+        if (!accept.includes("application/json"))
+          needs.push("application/json");
+        if (!accept.includes("text/event-stream"))
+          needs.push("text/event-stream");
         if (needs.length > 0) {
-          const patched = accept ? `${accept}, ${needs.join(', ')}` : needs.join(', ');
-          req.headers['accept'] = patched;
+          const patched = accept
+            ? `${accept}, ${needs.join(", ")}`
+            : needs.join(", ");
+          req.headers["accept"] = patched;
           // Patch rawHeaders array (Hono reads this for Web Standard Request conversion)
           let found = false;
           for (let i = 0; i < req.rawHeaders.length; i += 2) {
-            if (req.rawHeaders[i].toLowerCase() === 'accept') {
+            if (req.rawHeaders[i].toLowerCase() === "accept") {
               req.rawHeaders[i + 1] = patched;
               found = true;
               break;
             }
           }
           if (!found) {
-            req.rawHeaders.push('Accept', patched);
+            req.rawHeaders.push("Accept", patched);
           }
         }
 
         try {
           switch (req.method) {
-            case 'POST':
+            case "POST":
               await handlePost(req, res);
               break;
-            case 'GET':
+            case "GET":
               await handleGet(req, res);
               break;
-            case 'DELETE':
+            case "DELETE":
               await handleDelete(req, res);
               break;
             default:
-              res.writeHead(405, { 'Content-Type': 'text/plain' });
-              res.end('Method not allowed');
+              res.writeHead(405, { "Content-Type": "text/plain" });
+              res.end("Method not allowed");
           }
         } catch (err) {
-          console.error('[memorix] HTTP handler error:', err);
+          console.error("[memorix] HTTP handler error:", err);
           if (!res.headersSent) {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({
-              jsonrpc: '2.0',
-              error: { code: -32603, message: 'Internal server error' },
-              id: null,
-            }));
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                error: { code: -32603, message: "Internal server error" },
+                id: null,
+              }),
+            );
           }
         }
         return;
       }
 
       // Dashboard API
-      if (url.pathname.startsWith('/api/')) {
+      if (url.pathname.startsWith("/api/")) {
         await handleDashApi(req, res);
         return;
       }
@@ -1096,8 +1423,10 @@ export default defineCommand({
       await serveDashStatic(req, res);
     });
 
-    httpServer.listen(port, '127.0.0.1', () => {
-      console.error(`[memorix] MCP Streamable HTTP Server listening on http://127.0.0.1:${port}/mcp`);
+    httpServer.listen(port, "127.0.0.1", () => {
+      console.error(
+        `[memorix] MCP Streamable HTTP Server listening on http://127.0.0.1:${port}/mcp`,
+      );
       console.error(`[memorix] Dashboard:  http://127.0.0.1:${port}/`);
       console.error(`[memorix] Team API:   http://127.0.0.1:${port}/api/team`);
       console.error(`[memorix] Sessions at startup: ${sessions.size} (live count available at /api/team)`);
@@ -1108,15 +1437,17 @@ export default defineCommand({
       import('../update-checker.js').then(m => m.checkForUpdates()).catch(() => {});
     });
 
-    // Session timeout GC — close sessions idle for 30 minutes
-    const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+    // Session timeout GC — close sessions idle for 4 hours
+    const SESSION_TIMEOUT_MS = 8 * 60 * 60 * 1000;
     const gcInterval = setInterval(() => {
       maybeProbeSummary(); // Flush suppressed probe count periodically
       const now = Date.now();
       for (const [sid, state] of sessions) {
         const lastActive = sessionLastActivity.get(sid) ?? 0;
         if (now - lastActive > SESSION_TIMEOUT_MS) {
-          console.error(`[memorix] Session ${sid.slice(0, 8)}… timed out (idle ${Math.round((now - lastActive) / 60000)}min), closing`);
+          console.error(
+            `[memorix] Session ${sid.slice(0, 8)}… timed out (idle ${Math.round((now - lastActive) / 60000)}min), closing`,
+          );
           state.transport.close().catch(() => {});
           sessions.delete(sid);
           sessionLastActivity.delete(sid);
@@ -1128,9 +1459,11 @@ export default defineCommand({
     // Graceful shutdown
     const shutdown = async () => {
       if (suppressedProbeCount > 0) {
-        console.error(`[memorix] ${suppressedProbeCount} probe connection(s) suppressed during this session`);
+        console.error(
+          `[memorix] ${suppressedProbeCount} probe connection(s) suppressed during this session`,
+        );
       }
-      console.error('[memorix] Shutting down HTTP server...');
+      console.error("[memorix] Shutting down HTTP server...");
       for (const [sid, state] of sessions) {
         try {
           await state.transport.close();
@@ -1143,7 +1476,7 @@ export default defineCommand({
       process.exit(0);
     };
 
-    process.on('SIGINT', shutdown);
-    process.on('SIGTERM', shutdown);
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
   },
 });
