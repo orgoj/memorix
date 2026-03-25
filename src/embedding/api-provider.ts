@@ -39,14 +39,19 @@ function textHash(text: string): string {
 }
 
 async function loadDiskCache(config: ReturnType<typeof getApiEmbeddingConfig>): Promise<void> {
-  if (!config.diskCache) return;
+  console.error(`[memorix] loadDiskCache called, diskCache=${config.diskCache}, CACHE_FILE=${CACHE_FILE}`);
+  if (!config.diskCache) {
+    console.error('[memorix] diskCache disabled in config, skipping load');
+    return;
+  }
   try {
     const raw = await readFile(CACHE_FILE, 'utf-8');
+    console.error(`[memorix] Cache file read OK, size=${raw.length} bytes`);
     const entries: [string, number[]][] = JSON.parse(raw);
     for (const [k, v] of entries) cache.set(k, v);
     console.error(`[memorix] Loaded ${entries.length} cached API embeddings from disk`);
-  } catch {
-    // No cache file or corrupt cache; start fresh.
+  } catch (err) {
+    console.error(`[memorix] Failed to load cache: ${err instanceof Error ? err.message : err}`);
   }
   try {
     const raw = await readFile(FAILURE_FILE, 'utf-8');

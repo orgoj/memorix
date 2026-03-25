@@ -205,7 +205,7 @@ export function getApiEmbeddingConfig(): {
   diskSaveDebounce: number;
 } {
   const cfg = loadYamlConfig().embedding?.api ?? {};
-  return {
+  const result = {
     batchSize: cfg.batchSize ?? 2048,           // ORIGINAL: was hardcoded 2048
     maxConcurrency: cfg.maxConcurrency ?? 4,
     timeout: cfg.timeout ?? 10000,              // ORIGINAL: was hardcoded 10s
@@ -216,6 +216,8 @@ export function getApiEmbeddingConfig(): {
     diskCache: cfg.diskCache ?? true,
     diskSaveDebounce: cfg.diskSaveDebounce ?? 5000,
   };
+  console.error(`[memorix] getApiEmbeddingConfig: diskCache=${result.diskCache} (yaml=${cfg.diskCache})`);
+  return result;
 }
 
 /** FastEmbed configuration with original defaults */
