@@ -18,6 +18,9 @@ import {
   batchGenerateEmbeddings,
   makeOramaObservationId,
 } from '../store/orama-store.js';
+
+// Mutex to prevent concurrent reindex operations
+let reindexRunning = false;
 import { saveObservationsJson, loadObservationsJson, saveIdCounter, loadIdCounter } from '../store/persistence.js';
 import { withFileLock } from '../store/file-lock.js';
 import { countTextTokens } from '../compact/token-budget.js';
@@ -556,10 +559,18 @@ export function suggestTopicKey(type: string, title: string): string {
  * to seconds for large observation sets (500+).
  */
 export async function reindexObservations(): Promise<number> {
-  if (observations.length === 0) return 0;
+  // Prevent concurrent reindex operations (causes CPU waste and "already exists" errors)
+  if (reindexRunning) {
+    console.error('[memorix] Reindex already in progress, skipping duplicate call');
+    return 0;
+  }
+  reindexRunning = true;
 
-  // Reset the Orama index to ensure clean reindex (idempotent)
-  await resetDb();
+  try {
+    if (observations.length === 0) return 0;
+
+    // Reset the Orama index to ensure clean reindex (idempotent)
+    await resetDb();
 
   // Batch-generate all embeddings at once (much faster than individual calls)
   let embeddings: (number[] | null)[] = [];
@@ -605,6 +616,9 @@ export async function reindexObservations(): Promise<number> {
     }
   }
   return count;
+  } finally {
+    reindexRunning = false;
+  }
 }
 
 // ── Vector-missing observability & backfill ─────────────────────────
