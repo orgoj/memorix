@@ -20,7 +20,7 @@ import { watchFile } from 'node:fs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { KnowledgeGraphManager } from './memory/graph.js';
-import { initObservations, storeObservation, reindexObservations, migrateProjectIds, getObservation } from './memory/observations.js';
+import { initObservations, storeObservation, reindexObservations, migrateProjectIds, getObservation, markIndexStale } from './memory/observations.js';
 import { resetDb } from './store/orama-store.js';
 import { createAutoRelations } from './memory/auto-relations.js';
 import { extractEntities } from './memory/entity-extractor.js';
@@ -3286,6 +3286,7 @@ export async function createMemorixServer(
           if (reloading) return;
           reloading = true;
           try {
+            markIndexStale();
             await resetDb();
             await initObservations(projectDir);
             const count = await reindexObservations();
@@ -3345,6 +3346,7 @@ export async function createMemorixServer(
       loadDotenv(project.rootPath);
     } catch { /* best-effort */ }
 
+    markIndexStale();
     await initializeProjectRuntime('switch');
     return true;
   };

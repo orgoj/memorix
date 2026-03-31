@@ -21,6 +21,18 @@ import {
 
 // Mutex to prevent concurrent reindex operations
 let reindexRunning = false;
+// Tracks whether the Orama index has been hydrated in this process.
+// After first successful reindex, subsequent sessions skip the expensive full rebuild.
+// Set to null by markIndexStale() when data changes externally (hot-reload, project switch).
+let indexHydratedCount = -1;
+
+/**
+ * Mark the search index as stale so the next reindexObservations() call
+ * will perform a full rebuild. Called by hot-reload and project switch.
+ */
+export function markIndexStale(): void {
+  indexHydratedCount = -1;
+}
 import { saveObservationsJson, loadObservationsJson, saveIdCounter, loadIdCounter } from '../store/persistence.js';
 import { withFileLock } from '../store/file-lock.js';
 import { countTextTokens } from '../compact/token-budget.js';
@@ -223,6 +235,7 @@ export async function storeObservation(input: {
     };
 
     await insertObservation(doc);
+    indexHydratedCount++;
   };
 
   await assignAndPersist();
@@ -564,6 +577,14 @@ export async function reindexObservations(): Promise<number> {
     console.error('[memorix] Reindex already in progress, skipping duplicate call');
     return 0;
   }
+
+  // Skip full reindex if index was already hydrated and observation count unchanged.
+  // storeObservation() and resolveObservations() already update Orama incrementally,
+  // so a full reset + re-embed is only needed on first startup or after stale event.
+  if (indexHydratedCount >= 0 && indexHydratedCount === observations.length) {
+    return 0;
+  }
+
   reindexRunning = true;
 
   try {
@@ -612,9 +633,16 @@ export async function reindexObservations(): Promise<number> {
       await insertObservation(doc);
       count++;
     } catch (err) {
-      console.error(`[memorix] Failed to reindex observation #${obs.id}: ${err}`);
+      // Gracefully handle race-condition duplicates (cross-process reindex)
+      if (String(err).includes('already exists')) {
+        count++;
+      } else {
+        console.error(`[memorix] Failed to reindex observation #${obs.id}: ${err}`);
+      }
     }
   }
+  // Mark index as hydrated so subsequent sessions skip the expensive rebuild
+  indexHydratedCount = observations.length;
   return count;
   } finally {
     reindexRunning = false;
