@@ -17,6 +17,7 @@ import {
   generateEmbedding,
   batchGenerateEmbeddings,
   makeOramaObservationId,
+  getObservationCount,
 } from '../store/orama-store.js';
 
 // Mutex to prevent concurrent reindex operations
@@ -578,10 +579,15 @@ export async function reindexObservations(): Promise<number> {
     return 0;
   }
 
-  // Skip full reindex if index was already hydrated and observation count unchanged.
+  // Skip full reindex if Orama index already has all observations.
   // storeObservation() and resolveObservations() already update Orama incrementally,
   // so a full reset + re-embed is only needed on first startup or after stale event.
-  if (indexHydratedCount >= 0 && indexHydratedCount === observations.length) {
+  // We check the actual Orama document count (not in-memory counter) to survive restarts.
+  const oramaCount = await getObservationCount();
+  console.error(`[memorix] reindexObservations: oramaCount=${oramaCount}, observations.length=${observations.length}`);
+  if (oramaCount === observations.length) {
+    indexHydratedCount = oramaCount; // sync in-memory counter
+    console.error(`[memorix] Skipping reindex - Orama already hydrated`);
     return 0;
   }
 

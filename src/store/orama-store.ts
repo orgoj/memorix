@@ -105,11 +105,16 @@ function isCommandStyleEntry(title: string): boolean {
  * Graceful degradation: no provider → fulltext only, provider → hybrid.
  */
 export async function getDb(): Promise<AnyOrama> {
-  if (db) return db;
+  console.error(`[memorix] getDb() called, db=${!!db}, stack=${new Error().stack?.split('\n').slice(1, 4).join(' > ')}`);
+  if (db) {
+    console.error(`[memorix] getDb() returning cached db`);
+    return db;
+  }
 
   // Check if embedding provider is available
   const provider = await getEmbeddingProvider();
   embeddingEnabled = provider !== null;
+  console.error(`[memorix] getDb() creating new db, embeddingEnabled=${embeddingEnabled}`);
 
   const baseSchema = {
     id: 'string' as const,
@@ -137,6 +142,7 @@ export async function getDb(): Promise<AnyOrama> {
     : baseSchema;
 
   db = await create({ schema });
+  console.error(`[memorix] getDb() created new db, db=${!!db}`);
 
   return db;
 }
@@ -145,6 +151,7 @@ export async function getDb(): Promise<AnyOrama> {
  * Reset the database instance (useful for testing).
  */
 export async function resetDb(): Promise<void> {
+  console.error(`[memorix] resetDb() called, db was=${!!db}`);
   db = null;
   embeddingEnabled = false;
   lastSearchModeByProject.clear();
@@ -780,15 +787,18 @@ function applyTokenBudget(entries: IndexEntry[], maxTokens: number): IndexEntry[
  */
 export async function getObservationCount(projectId?: string): Promise<number> {
   const database = await getDb();
-  if (!projectId) {
-    return await count(database);
+  const oramaCount = await count(database);
+  console.error(`[memorix] getObservationCount: oramaCount=${oramaCount}, projectId=${projectId ?? 'all'}`);
+    if (!projectId) {
+    return oramaCount;
   }
   const results = await search(database, {
     term: '',
     where: { projectId },
     limit: 0,
   });
-  return results.count;
+  console.error(`[memorix] getObservationCount search result: count=${results.count}`);
+    return results.count;
 }
 
 /**
