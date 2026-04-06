@@ -42,6 +42,7 @@ const INTENT_PATTERNS: IntentPattern[] = [
   {
     intent: 'why',
     patterns: [
+      // English
       /\bwhy\b/i,
       /\breason(?:s|ing)?\b/i,
       /\brationale\b/i,
@@ -50,16 +51,20 @@ const INTENT_PATTERNS: IntentPattern[] = [
       /\bchose|chosen|picked\b/i,
       /\bdecid(?:e[ds]?|ing)\b/i,
       /\btrade-?off\b/i,
-      /为什么/,
-      /原因/,
-      /理由/,
-      /为何/,
+      // Chinese
+      /为什么/, /原因/, /理由/, /为何/,
+      // Czech
+      /\bproč\b/i,
+      /\bdůvod|důvodu|důvody\b/i,
+      /\bpročto|pročpak\b/i,
+      /\brozhodl|rozhodn|zvol|zvolil|vybr|výběr\b/i,
     ],
     weight: 1.0,
   },
   {
     intent: 'when',
     patterns: [
+      // English
       /\bwhen\b/i,
       /\btimeline\b/i,
       /\bhistory\b/i,
@@ -68,16 +73,19 @@ const INTENT_PATTERNS: IntentPattern[] = [
       /\byesterday\b/i,
       /\btoday\b/i,
       /\bchronolog/i,
-      /什么时候/,
-      /何时/,
-      /最近/,
-      /上次/,
+      // Chinese
+      /什么时候/, /何时/, /最近/, /上次/,
+      // Czech
+      /\bkdy\b/i,
+      /\bnedávno|nedavno|minule|naposled|potom|pak\b/i,
+      /\bchronologi|timeline|histori|hist\b/i,
     ],
     weight: 0.9,
   },
   {
     intent: 'how',
     patterns: [
+      // English
       /\bhow\s+(does|do|to|is|can|did|should|would)\b/i,
       /\barchitecture\b/i,
       /\bmechanism\b/i,
@@ -85,17 +93,20 @@ const INTENT_PATTERNS: IntentPattern[] = [
       /\bwork(?:s|ing|ed)?\b/i,
       /\bexplain\b/i,
       /\bunderstand\b/i,
-      /怎么/,
-      /如何/,
-      /机制/,
-      /原理/,
-      /架构/,
+      // Chinese
+      /怎么/, /如何/, /机制/, /原理/, /架构/,
+      // Czech
+      /\bjak\b/i,
+      /\bfunguje|funguj|pracuje|pracov|mechanism|princip\b/i,
+      /\barchitekt|postup|postupu|postupem\b/i,
+      /\bvysvětli|vysvetl|vysvětlení|vysvetleni\b/i,
     ],
     weight: 0.85,
   },
   {
     intent: 'what_changed',
     patterns: [
+      // English
       /\bwhat\s+changed\b/i,
       /\bwhat\s+was\s+(modified|updated|changed)\b/i,
       /\bdiff(?:erence)?\b/i,
@@ -103,16 +114,19 @@ const INTENT_PATTERNS: IntentPattern[] = [
       /\bmodifi(?:ed|cation)\b/i,
       /\bupdat(?:e[ds]?|ing)\b/i,
       /\brefactor(?:ed|ing)?\b/i,
-      /改了/,
-      /修改/,
-      /变更/,
-      /变化/,
+      // Chinese
+      /改了/, /修改/, /变更/, /变化/,
+      // Czech
+      /\bco se změnil|co změnil|změnil|změněn|změny\b/i,
+      /\bupraven|uprav|přepsan|prep|přeps|prepsan|modifikov\b/i,
+      /\bdiff|rozdíl|rozdíly|verze|version\b/i,
     ],
     weight: 0.8,
   },
   {
     intent: 'problem',
     patterns: [
+      // English
       /\bbug(?:s|gy)?\b/i,
       /\berror(?:s)?\b/i,
       /\bfix(?:e[ds]|ing)?\b/i,
@@ -126,11 +140,13 @@ const INTENT_PATTERNS: IntentPattern[] = [
       /\bworkaround\b/i,
       /\btroubleshoot/i,
       /\bdebug(?:ging)?\b/i,
-      /报错/,
-      /问题/,
-      /修复/,
-      /故障/,
-      /异常/,
+      // Chinese
+      /报错/, /问题/, /修复/, /故障/, /异常/,
+      // Czech - vulgarity/frustration markers
+      /\bkurwa|kurva|nasran|nasr| WTF\b/i,
+      // Czech - general problem terms
+      /\bprobl[ée]m|chyba|bug|nefunguje|nefung|rozbit|oprav|opravit\b/i,
+      /\bselhání|pád|crash|nejde|nefunguje\b/i,
     ],
     weight: 0.9,
   },

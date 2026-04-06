@@ -16,13 +16,13 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { EmbeddingProvider } from './provider.js';
+import { getFastEmbedConfig } from '../config.js';
 
 const CACHE_DIR = process.env.MEMORIX_DATA_DIR || join(homedir(), '.memorix', 'data');
 const CACHE_FILE = join(CACHE_DIR, '.embedding-cache.json');
 
 // In-memory cache keyed by text hash → embedding
-const cache = new Map<string, number[]>();
-const MAX_CACHE_SIZE = 5000;
+let cache: Map<string, number[]> | undefined;
 let diskCacheDirty = false;
 
 function textHash(text: string): string {
@@ -53,13 +53,17 @@ async function saveDiskCache(): Promise<void> {
 }
 
 export class FastEmbedProvider implements EmbeddingProvider {
-  readonly name = 'fastembed-bge-small';
-  readonly dimensions = 384;
+  readonly name: string;
+  readonly dimensions: number;
 
   private model: { embed: (docs: string[], batchSize?: number) => AsyncGenerator<number[][]>; queryEmbed: (query: string) => Promise<number[]> };
+  private config: ReturnType<typeof getFastEmbedConfig>;
 
-  private constructor(model: FastEmbedProvider['model']) {
+  private constructor(model: FastEmbedProvider['model'], config: ReturnType<typeof getFastEmbedConfig>, modelName: string) {
     this.model = model;
+    this.config = config;
+    this.dimensions = config.dimensions;
+    this.name = `fastembed-${modelName}`;
   }
 
   /**
@@ -68,14 +72,35 @@ export class FastEmbedProvider implements EmbeddingProvider {
    * Loads persistent embedding cache from disk.
    */
   static async create(): Promise<FastEmbedProvider> {
+    const config = getFastEmbedConfig();
+
     // Dynamic import — throws if fastembed is not installed
     const { EmbeddingModel, FlagEmbedding } = await import('fastembed');
+
+    // Map model name from config to EmbeddingModel enum or use as-is for custom models
+    let modelConfig;
+    if (config.model === 'BGESmallENV15') {
+      modelConfig = EmbeddingModel.BGESmallENV15;
+    } else {
+      // Custom model string
+      modelConfig = config.model;
+    }
+
     const model = await FlagEmbedding.init({
-      model: EmbeddingModel.BGESmallENV15,
+      model: modelConfig,
     });
+
+    // Initialize cache once (module-level singleton)
+    if (!cache) {
+      cache = new Map();
+    }
+
     // Load disk cache before returning — subsequent embedBatch calls will hit cache
     await loadDiskCache();
-    return new FastEmbedProvider(model);
+
+    // Extract model name for display
+    const modelName = config.model.replace(/^BAAI\//, '').replace(/[^a-zA-Z0-9-]/g, '-').toLowerCase();
+    return new FastEmbedProvider(model, config, modelName);
   }
 
   async embed(text: string): Promise<number[]> {
@@ -114,7 +139,7 @@ export class FastEmbedProvider implements EmbeddingProvider {
     if (uncachedTexts.length > 0) {
       console.error(`[memorix] Embedding ${uncachedTexts.length}/${texts.length} uncached texts (${texts.length - uncachedTexts.length} from cache)`);
       let batchIdx = 0;
-      for await (const batch of this.model.embed(uncachedTexts, 64)) {
+      for await (const batch of this.model.embed(uncachedTexts, this.config.batchSize)) {
         for (const vec of batch) {
           const originalIdx = uncachedIndices[batchIdx];
           const plain = Array.from(vec) as number[];
@@ -132,7 +157,7 @@ export class FastEmbedProvider implements EmbeddingProvider {
 
   private cacheSet(hash: string, value: number[]): void {
     // Evict oldest entries if cache is full
-    if (cache.size >= MAX_CACHE_SIZE) {
+    if (cache.size >= this.config.cacheSize) {
       const firstKey = cache.keys().next().value;
       if (firstKey !== undefined) cache.delete(firstKey);
     }

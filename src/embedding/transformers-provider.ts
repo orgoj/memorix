@@ -16,19 +16,23 @@
  */
 
 import type { EmbeddingProvider } from './provider.js';
+import { getTransformersConfig } from '../config.js';
 
 // In-memory LRU cache
-const cache = new Map<string, number[]>();
-const MAX_CACHE_SIZE = 5000;
+let cache: Map<string, number[]> | undefined;
 
 export class TransformersProvider implements EmbeddingProvider {
-    readonly name = 'transformers-minilm';
-    readonly dimensions = 384;
+    readonly name: string;
+    readonly dimensions: number;
 
     private extractor: any; // Pipeline instance
+    private config: ReturnType<typeof getTransformersConfig>;
 
-    private constructor(extractor: any) {
+    private constructor(extractor: any, config: ReturnType<typeof getTransformersConfig>, modelName: string) {
         this.extractor = extractor;
+        this.config = config;
+        this.dimensions = config.dimensions;
+        this.name = `transformers-${modelName}`;
     }
 
     /**
@@ -36,14 +40,24 @@ export class TransformersProvider implements EmbeddingProvider {
      * Downloads model on first use (~22MB quantized), cached locally after.
      */
     static async create(): Promise<TransformersProvider> {
+        const config = getTransformersConfig();
+
         // Dynamic import — throws if @huggingface/transformers is not installed
         const { pipeline } = await import('@huggingface/transformers');
         const extractor = await pipeline(
             'feature-extraction',
-            'Xenova/all-MiniLM-L6-v2',
-            { dtype: 'q8' }, // Quantized for small footprint
+            config.model,
+            { dtype: config.dtype }, // Quantized for small footprint
         );
-        return new TransformersProvider(extractor);
+
+        // Initialize cache once (module-level singleton)
+        if (!cache) {
+            cache = new Map();
+        }
+
+        // Extract model name for display
+        const modelName = config.model.replace('Xenova/', '').replace(/[^a-zA-Z0-9-]/g, '-').toLowerCase();
+        return new TransformersProvider(extractor, config, modelName);
     }
 
     async embed(text: string): Promise<number[]> {
@@ -102,7 +116,7 @@ export class TransformersProvider implements EmbeddingProvider {
     }
 
     private cacheSet(key: string, value: number[]): void {
-        if (cache.size >= MAX_CACHE_SIZE) {
+        if (cache.size >= this.config.cacheSize) {
             const firstKey = cache.keys().next().value;
             if (firstKey !== undefined) cache.delete(firstKey);
         }

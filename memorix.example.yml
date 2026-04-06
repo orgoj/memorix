@@ -31,6 +31,19 @@ embedding:
   # model: text-embedding-3-small
   # dimensions: 1024        # Override auto-detected dimensions
 
+  # API provider settings (OpenAI-compatible endpoints)
+  # For Ollama: override batchSize, timeout, maxInputChars for slower models
+  api:
+    batchSize: 2048         # Texts per batch (default: 2048, for Ollama use 64)
+    maxConcurrency: 4       # Max concurrent requests (default: 4)
+    timeout: 10000          # Request timeout in ms (default: 10000, for Ollama use 60000)
+    maxRetries: 3           # Max retries on failure (default: 3)
+    baseDelay: 500          # Base delay between retries in ms (default: 500)
+    maxInputChars: 32000    # Max input text length (default: 32000, for Ollama use 10000)
+    cacheSize: 10000        # In-memory LRU cache size (default: 10000)
+    diskCache: true         # Enable disk cache (default: true)
+    diskSaveDebounce: 5000  # Disk save debounce in ms (default: 5000)
+
 # ── Git-Memory Pipeline ──────────────────────────────────────
 # Automatically capture engineering knowledge from git commits.
 # Every commit becomes a searchable, immutable memory.

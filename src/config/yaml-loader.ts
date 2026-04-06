@@ -18,6 +18,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import yaml from 'js-yaml';
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -37,6 +38,32 @@ export interface MemorixYamlConfig {
     apiKey?: string;
     baseUrl?: string;
     dimensions?: number;
+
+    /** API provider settings (OpenAI-compatible endpoints) */
+    api?: {
+      /** Optional API key override for local/self-hosted endpoints */
+      apiKey?: string;
+      /** Optional base URL override, e.g. http://localhost:11434/v1 for Ollama */
+      baseUrl?: string;
+      /** Number of texts per batch request (default: 64) */
+      batchSize?: number;
+      /** Max concurrent requests (default: 4) */
+      maxConcurrency?: number;
+      /** Request timeout in ms (default: 60000) */
+      timeout?: number;
+      /** Max retries on failure (default: 3) */
+      maxRetries?: number;
+      /** Base delay between retries in ms (default: 500) */
+      baseDelay?: number;
+      /** Max input text length in chars (default: 10000) */
+      maxInputChars?: number;
+      /** In-memory LRU cache size (default: 10000) */
+      cacheSize?: number;
+      /** Enable disk cache (default: true) */
+      diskCache?: boolean;
+      /** Disk save debounce in ms (default: 5000) */
+      diskSaveDebounce?: number;
+    };
   };
 
   /** Git-Memory pipeline configuration */
@@ -180,28 +207,6 @@ export function resetYamlConfigCache(): void {
   cachedProjectRoot = null;
 }
 
-/**
- * Parse YAML string using gray-matter's internal js-yaml.
- * gray-matter is already a dependency — no new deps needed.
- */
 function parseYaml(content: string): MemorixYamlConfig {
-  // gray-matter uses js-yaml internally; we import it from there
-  // But for simplicity and reliability, use a basic YAML parser
-  // that handles the flat config structure we need.
-  try {
-    // Dynamic import of js-yaml through gray-matter's dependency
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const yaml = require('js-yaml');
-    return yaml.load(content) as MemorixYamlConfig ?? {};
-  } catch {
-    // Fallback: try gray-matter which wraps js-yaml
-    try {
-      const matter = require('gray-matter');
-      const parsed = matter(`---\n${content}\n---`);
-      return (parsed.data as MemorixYamlConfig) ?? {};
-    } catch {
-      console.error('[memorix] YAML parse failed — check memorix.yml syntax');
-      return {};
-    }
-  }
+  return (yaml.load(content) as MemorixYamlConfig) ?? {};
 }
