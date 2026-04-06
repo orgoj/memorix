@@ -53,3 +53,6 @@ temple/
 .vscode/
 *.swp
 *.swo
+.beads/beads.db
+
+.omc/

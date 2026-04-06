@@ -1,0 +1,3 @@
+allow npm run build
+allow memorix *
+allow git *
