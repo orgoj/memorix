@@ -125,6 +125,7 @@ export function getEmbeddingApiKey(): string | undefined {
     process.env.MEMORIX_EMBEDDING_API_KEY ||  // Embedding-specific (优先级最高)
     process.env.MEMORIX_API_KEY ||  // Unified API key (fallback)
     process.env.MEMORIX_LLM_API_KEY ||
+    loadYamlConfig().embedding?.api?.apiKey ||
     loadYamlConfig().embedding?.apiKey ||
     loadFileConfig().embeddingApi?.apiKey ||
     loadYamlConfig().llm?.apiKey ||
@@ -138,6 +139,7 @@ export function getEmbeddingApiKey(): string | undefined {
 export function getEmbeddingBaseUrl(): string {
   return (
     process.env.MEMORIX_EMBEDDING_BASE_URL ||
+    loadYamlConfig().embedding?.api?.baseUrl ||
     loadYamlConfig().embedding?.baseUrl ||
     loadFileConfig().embeddingApi?.baseUrl ||
     process.env.MEMORIX_LLM_BASE_URL ||
@@ -187,3 +189,63 @@ export function getTeamConfig(): NonNullable<MemorixYamlConfig['team']> {
 
 /** Get the full resolved YAML config (for status display) */
 export { loadYamlConfig } from './config/yaml-loader.js';
+
+// ─── Embedding Provider Configuration (YAML-based) ───────────────
+
+/** API embedding configuration with ORIGINAL defaults */
+export function getApiEmbeddingConfig(): {
+  batchSize: number;
+  maxConcurrency: number;
+  timeout: number;
+  maxRetries: number;
+  baseDelay: number;
+  maxInputChars: number;
+  cacheSize: number;
+  diskCache: boolean;
+  diskSaveDebounce: number;
+} {
+  const cfg = loadYamlConfig().embedding?.api ?? {};
+  const result = {
+    batchSize: cfg.batchSize ?? 2048,           // ORIGINAL: was hardcoded 2048
+    maxConcurrency: cfg.maxConcurrency ?? 4,
+    timeout: cfg.timeout ?? 10000,              // ORIGINAL: was hardcoded 10s
+    maxRetries: cfg.maxRetries ?? 3,
+    baseDelay: cfg.baseDelay ?? 500,
+    maxInputChars: cfg.maxInputChars ?? 32000,  // ORIGINAL: was hardcoded 32000
+    cacheSize: cfg.cacheSize ?? 10000,
+    diskCache: cfg.diskCache ?? true,
+    diskSaveDebounce: cfg.diskSaveDebounce ?? 5000,
+  };
+  console.error(`[memorix] getApiEmbeddingConfig: diskCache=${result.diskCache} (yaml=${cfg.diskCache})`);
+  return result;
+}
+
+/** FastEmbed configuration with original defaults */
+export function getFastEmbedConfig(): {
+  model: string;
+  dimensions: number;
+  batchSize: number;
+  cacheSize: number;
+} {
+  return {
+    model: 'BGESmallENV15',
+    dimensions: 384,
+    batchSize: 256,
+    cacheSize: 10000,
+  };
+}
+
+/** Transformers.js configuration with original defaults */
+export function getTransformersConfig(): {
+  model: string;
+  dimensions: number;
+  dtype: 'q8' | 'q4' | 'fp32';
+  cacheSize: number;
+} {
+  return {
+    model: 'Xenova/all-MiniLM-L6-v2',
+    dimensions: 384,
+    dtype: 'q8',
+    cacheSize: 10000,
+  };
+}

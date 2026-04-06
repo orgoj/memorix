@@ -8,7 +8,7 @@
  *   - MEMORIX_EMBEDDING=fastembed     → local ONNX inference (384-dim bge-small, ~300MB RAM)
  *   - MEMORIX_EMBEDDING=transformers  → pure JS WASM inference (384-dim MiniLM, ~500MB RAM)
  *   - MEMORIX_EMBEDDING=api           → remote API via OpenAI-compatible /v1/embeddings (zero local RAM)
- *   - MEMORIX_EMBEDDING=auto          → try configured API → fastembed → transformers → off
+ *   - MEMORIX_EMBEDDING=auto          → try fastembed → transformers → off (legacy behavior)
  *
  * API mode env vars (MEMORIX_EMBEDDING=api):
  *   - MEMORIX_EMBEDDING_API_KEY       → API key (fallback: MEMORIX_LLM_API_KEY → OPENAI_API_KEY)
@@ -27,6 +27,8 @@
  * Architecture inspired by Mem0's multi-provider embedding design.
  */
 
+import { getEmbeddingMode as getConfiguredEmbeddingMode } from '../config.js';
+
 export interface EmbeddingProvider {
   /** Provider name for logging/cache keys */
   readonly name: string;
@@ -42,9 +44,6 @@ export interface EmbeddingProvider {
 let provider: EmbeddingProvider | null = null;
 let initPromise: Promise<EmbeddingProvider | null> | null = null;
 
-type EmbeddingMode = 'off' | 'fastembed' | 'transformers' | 'api' | 'auto';
-type ProviderKind = 'api' | 'fastembed' | 'transformers' | 'unknown';
-
 /**
  * Tracks whether the last init attempt resulted in a temporary failure
  * (mode != 'off' but provider returned null). When true, the next
@@ -56,161 +55,8 @@ let lastInitWasTemporaryFailure = false;
  * Get configured embedding mode from environment.
  * Default is 'off' to minimize resource usage.
  */
-function getEmbeddingMode(): EmbeddingMode {
-  // Unified: env vars > config.json > 'off'
-  try {
-    const { getEmbeddingMode: cfgMode } = require('../config.js');
-    return cfgMode();
-  } catch {
-    // Fallback if config module not available
-    const env = process.env.MEMORIX_EMBEDDING?.toLowerCase()?.trim();
-    if (env === 'fastembed' || env === 'transformers' || env === 'api' || env === 'auto') return env;
-    return 'off';
-  }
-}
-
-function hasAPIEmbeddingConfig(): boolean {
-  try {
-    const {
-      getEmbeddingApiKey,
-      getEmbeddingBaseUrl,
-      getEmbeddingModel,
-    } = require('../config.js');
-
-    return Boolean(
-      getEmbeddingApiKey?.() &&
-      getEmbeddingBaseUrl?.() &&
-      getEmbeddingModel?.(),
-    );
-  } catch {
-    return Boolean(
-      process.env.MEMORIX_EMBEDDING_API_KEY ||
-      process.env.MEMORIX_API_KEY ||
-      process.env.MEMORIX_LLM_API_KEY ||
-      process.env.OPENAI_API_KEY,
-    );
-  }
-}
-
-function getProviderKind(candidate: EmbeddingProvider): ProviderKind {
-  if (candidate.name.startsWith('api-')) return 'api';
-  if (candidate.name.startsWith('fastembed-')) return 'fastembed';
-  if (candidate.name.startsWith('transformers-')) return 'transformers';
-  return 'unknown';
-}
-
-function isTemporaryEmbeddingFailure(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return (
-    /embedding api timeout/i.test(error.message) ||
-    /embedding api error \((402|429|5\d\d)\)/i.test(error.message) ||
-    /quota exceeded/i.test(error.message) ||
-    /account balance/i.test(error.message) ||
-    /fetch failed/i.test(error.message) ||
-    /econnreset/i.test(error.message) ||
-    /econnrefused/i.test(error.message) ||
-    /temporarily unavailable/i.test(error.message)
-  );
-}
-
-function markTemporaryFailure(reason: unknown): void {
-  provider = null;
-  initPromise = null;
-  lastInitWasTemporaryFailure = true;
-  lastFailureTimestamp = Date.now();
-  const message = reason instanceof Error ? reason.message : String(reason);
-  console.error(`[memorix] Embedding provider temporarily unavailable at runtime: ${message}`);
-}
-
-async function createFastEmbedProvider(): Promise<EmbeddingProvider | null> {
-  try {
-    const { FastEmbedProvider } = await import('./fastembed-provider.js');
-    return await FastEmbedProvider.create();
-  } catch (e) {
-    console.error(`[memorix] Failed to load fastembed: ${e instanceof Error ? e.message : e}`);
-    console.error('[memorix] Install with: npm install fastembed');
-    return null;
-  }
-}
-
-async function createTransformersProvider(): Promise<EmbeddingProvider | null> {
-  try {
-    const { TransformersProvider } = await import('./transformers-provider.js');
-    return await TransformersProvider.create();
-  } catch (e) {
-    console.error(`[memorix] Failed to load transformers: ${e instanceof Error ? e.message : e}`);
-    console.error('[memorix] Install with: npm install @huggingface/transformers');
-    return null;
-  }
-}
-
-async function createAPIProvider(): Promise<EmbeddingProvider | null> {
-  try {
-    const { APIEmbeddingProvider } = await import('./api-provider.js');
-    return await APIEmbeddingProvider.create();
-  } catch (e) {
-    console.error(`[memorix] Failed to init API embedding: ${e instanceof Error ? e.message : e}`);
-    return null;
-  }
-}
-
-async function createLocalFallbackProvider(): Promise<EmbeddingProvider | null> {
-  const fastembed = await createFastEmbedProvider();
-  if (fastembed) return fastembed;
-
-  const transformers = await createTransformersProvider();
-  if (transformers) return transformers;
-
-  return null;
-}
-
-function wrapProvider(candidate: EmbeddingProvider): EmbeddingProvider {
-  const kind = getProviderKind(candidate);
-
-  return {
-    name: candidate.name,
-    dimensions: candidate.dimensions,
-    async embed(text: string): Promise<number[]> {
-      try {
-        return await candidate.embed(text);
-      } catch (error) {
-        if (kind === 'api' && getEmbeddingMode() === 'auto' && isTemporaryEmbeddingFailure(error)) {
-          console.error('[memorix] API embedding temporarily unavailable — switching to local fallback provider');
-          const fallback = await createLocalFallbackProvider();
-          if (fallback) {
-            provider = wrapProvider(fallback);
-            console.error(`[memorix] Embedding fallback activated: ${provider.name} (${provider.dimensions}d)`);
-            return provider.embed(text);
-          }
-        }
-
-        if (isTemporaryEmbeddingFailure(error)) {
-          markTemporaryFailure(error);
-        }
-        throw error;
-      }
-    },
-    async embedBatch(texts: string[]): Promise<number[][]> {
-      try {
-        return await candidate.embedBatch(texts);
-      } catch (error) {
-        if (kind === 'api' && getEmbeddingMode() === 'auto' && isTemporaryEmbeddingFailure(error)) {
-          console.error('[memorix] API embedding temporarily unavailable — switching to local fallback provider');
-          const fallback = await createLocalFallbackProvider();
-          if (fallback) {
-            provider = wrapProvider(fallback);
-            console.error(`[memorix] Embedding fallback activated: ${provider.name} (${provider.dimensions}d)`);
-            return provider.embedBatch(texts);
-          }
-        }
-
-        if (isTemporaryEmbeddingFailure(error)) {
-          markTemporaryFailure(error);
-        }
-        throw error;
-      }
-    },
-  };
+function getEmbeddingMode(): 'off' | 'fastembed' | 'transformers' | 'api' | 'auto' {
+  return getConfiguredEmbeddingMode();
 }
 
 /** Minimum interval between retry attempts after a temporary failure (ms). */
@@ -257,46 +103,62 @@ export async function getEmbeddingProvider(): Promise<EmbeddingProvider | null> 
 
     // Explicit fastembed
     if (mode === 'fastembed') {
-      const initialized = await createFastEmbedProvider();
-      if (!initialized) return null;
-      provider = wrapProvider(initialized);
-      console.error(`[memorix] Embedding provider: ${provider.name} (${provider.dimensions}d)`);
-      return provider;
+      try {
+        const { FastEmbedProvider } = await import('./fastembed-provider.js');
+        provider = await FastEmbedProvider.create();
+        console.error(`[memorix] Embedding provider: ${provider!.name} (${provider!.dimensions}d)`);
+        return provider;
+      } catch (e) {
+        console.error(`[memorix] Failed to load fastembed: ${e instanceof Error ? e.message : e}`);
+        console.error('[memorix] Install with: npm install fastembed');
+        return null;
+      }
     }
 
     // Explicit transformers
     if (mode === 'transformers') {
-      const initialized = await createTransformersProvider();
-      if (!initialized) return null;
-      provider = wrapProvider(initialized);
-      console.error(`[memorix] Embedding provider: ${provider.name} (${provider.dimensions}d)`);
-      return provider;
+      try {
+        const { TransformersProvider } = await import('./transformers-provider.js');
+        provider = await TransformersProvider.create();
+        console.error(`[memorix] Embedding provider: ${provider!.name} (${provider!.dimensions}d)`);
+        return provider;
+      } catch (e) {
+        console.error(`[memorix] Failed to load transformers: ${e instanceof Error ? e.message : e}`);
+        console.error('[memorix] Install with: npm install @huggingface/transformers');
+        return null;
+      }
     }
 
     // API mode: remote embedding via OpenAI-compatible endpoint
     if (mode === 'api') {
-      const initialized = await createAPIProvider();
-      if (!initialized) return null;
-      provider = wrapProvider(initialized);
-      console.error(`[memorix] Embedding provider: ${provider.name} (${provider.dimensions}d)`);
-      return provider;
-    }
-
-    // Auto mode: try configured API first, then local fallbacks
-    if (hasAPIEmbeddingConfig()) {
-      const initialized = await createAPIProvider();
-      if (initialized) {
-        provider = wrapProvider(initialized);
-        console.error(`[memorix] Embedding provider: ${provider.name} (${provider.dimensions}d)`);
+      try {
+        const { APIEmbeddingProvider } = await import('./api-provider.js');
+        provider = await APIEmbeddingProvider.create();
+        console.error(`[memorix] Embedding provider: ${provider!.name} (${provider!.dimensions}d)`);
         return provider;
+      } catch (e) {
+        console.error(`[memorix] Failed to init API embedding: ${e instanceof Error ? e.message : e}`);
+        return null;
       }
     }
 
-    const localFallback = await createLocalFallbackProvider();
-    if (localFallback) {
-      provider = wrapProvider(localFallback);
-      console.error(`[memorix] Embedding provider: ${provider.name} (${provider.dimensions}d)`);
+    // Auto mode: try fastembed → transformers → off (legacy behavior)
+    try {
+      const { FastEmbedProvider } = await import('./fastembed-provider.js');
+      provider = await FastEmbedProvider.create();
+      console.error(`[memorix] Embedding provider: ${provider!.name} (${provider!.dimensions}d)`);
       return provider;
+    } catch {
+      // fastembed not installed — try next
+    }
+
+    try {
+      const { TransformersProvider } = await import('./transformers-provider.js');
+      provider = await TransformersProvider.create();
+      console.error(`[memorix] Embedding provider: ${provider!.name} (${provider!.dimensions}d)`);
+      return provider;
+    } catch {
+      // transformers not installed — degrade to fulltext
     }
 
     console.error('[memorix] No embedding provider available — using BM25 fulltext search');

@@ -19,6 +19,9 @@ import { getCliVersion } from './version.js';
 
 const NO_GIT_MSG = 'Memorix requires a git repo to establish project identity. Run `git init` in this workspace first.';
 
+// Supported languages for pattern/intent detection
+const SUPPORTED_LANGUAGES = 'EN, CN, CZ';
+
 // ============================================================
 // Workbench — Terminal-native memory control plane
 // ============================================================
@@ -161,7 +164,6 @@ async function runRemember(text: string): Promise<void> {
       narrative: text,
       facts: [],
       projectId: proj.id,
-      sourceDetail: 'explicit',
     });
 
     s.stop('Stored');
@@ -899,7 +901,7 @@ const main = defineCommand({
   meta: {
     name: 'memorix',
     version: getCliVersion(),
-    description: 'Local-first memory control plane for AI coding agents via MCP',
+    description: `Local-first memory control plane for AI coding agents via MCP (Languages: ${SUPPORTED_LANGUAGES})`,
   },
   subCommands: {
     // One-shot product commands (primary user paths)
@@ -1004,7 +1006,7 @@ const main = defineCommand({
       await startWorkbench();
     } else {
       // Non-interactive mode: show usage hint
-      console.error(`Memorix v${getCliVersion()} — Local-first memory control plane\n`);
+      console.error(`Memorix v${getCliVersion()} (${SUPPORTED_LANGUAGES}) — Local-first memory control plane\n`);
       console.error('Usage: memorix <command>\n');
       console.error('Commands:');
       console.error('  ask "q"    Ask Memorix a question (single-shot chat)');
