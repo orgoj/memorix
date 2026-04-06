@@ -20,8 +20,7 @@ import { watchFile } from 'node:fs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { KnowledgeGraphManager } from './memory/graph.js';
-import { initObservations, storeObservation, reindexObservations, migrateProjectIds, getObservation, getAllObservations } from './memory/observations.js';
-import { checkProjectAttribution, auditProjectObservations } from './memory/attribution-guard.js';
+import { initObservations, storeObservation, reindexObservations, migrateProjectIds, getObservation, markIndexStale } from './memory/observations.js';
 import { resetDb } from './store/orama-store.js';
 import { createAutoRelations } from './memory/auto-relations.js';
 import { extractEntities } from './memory/entity-extractor.js';
@@ -511,7 +510,6 @@ export async function createMemorixServer(
               projectId: project.id,
               topicKey: targetObs.topicKey,
               progress: progress as import('./types.js').ProgressInfo | undefined,
-              sourceDetail: 'explicit',
             });
             return {
               content: [{
@@ -536,7 +534,6 @@ export async function createMemorixServer(
               projectId: project.id,
               topicKey: targetObs.topicKey,
               progress: progress as import('./types.js').ProgressInfo | undefined,
-              sourceDetail: 'explicit',
             });
             return {
               content: [{
@@ -608,7 +605,6 @@ export async function createMemorixServer(
                   projectId: project.id,
                   topicKey: targetObs.topicKey,
                   progress: progress as import('./types.js').ProgressInfo | undefined,
-                  sourceDetail: 'explicit',
                 });
                 compactAction = `🔄 Compact UPDATE: merged into #${decision.targetId} (${decision.reason})`;
                 compactMerged = true;
@@ -703,19 +699,6 @@ export async function createMemorixServer(
         }
       } catch { /* compression is best-effort (timeout or LLM failure) */ }
 
-      // ── Attribution guard (passive, non-blocking) ─────────────────
-      // Warns when entityName is unknown in this project but well-established
-      // in a different project — signals a potential wrong-bucket write.
-      let attributionWarning = '';
-      try {
-        const attrCheck = await checkProjectAttribution(entityName, project.id, getAllObservations());
-        if (attrCheck.suspicious) {
-          attributionWarning = `\n⚠️ Attribution notice: entity "${entityName}" has 0 observations in ` +
-            `"${project.id}" but ${attrCheck.count} in "${attrCheck.knownIn}" ` +
-            `(confidence: ${attrCheck.confidence}). Verify the correct project is bound before storing.`;
-        }
-      } catch { /* guard is best-effort — never blocks the write */ }
-
       // Store the observation (may upsert if topicKey matches existing)
       markInternalWrite();
       const { observation: obs, upserted } = await storeObservation({
@@ -732,8 +715,6 @@ export async function createMemorixServer(
         progress: progress as import('./types.js').ProgressInfo | undefined,
         relatedCommits,
         relatedEntities,
-        sourceDetail: 'explicit',
-        valueCategory: formationResult?.evaluation.category,
       });
 
       // Add a reference to the entity's observations
@@ -852,7 +833,7 @@ export async function createMemorixServer(
         content: [
           {
             type: 'text' as const,
-            text: `${action} observation #${obs.id} "${title}" (~${obs.tokens} tokens)\nEntity: ${entityName} | Type: ${type} | Project: ${project.id}${obs.topicKey ? ` | Topic: ${obs.topicKey}` : ''}${compactAction}${compressionNote}${enrichment}${formationNote}${attributionWarning}`,
+            text: `${action} observation #${obs.id} "${title}" (~${obs.tokens} tokens)\nEntity: ${entityName} | Type: ${type} | Project: ${project.id}${obs.topicKey ? ` | Topic: ${obs.topicKey}` : ''}${compactAction}${compressionNote}${enrichment}${formationNote}`,
           },
         ],
       };
@@ -1032,7 +1013,6 @@ export async function createMemorixServer(
         parts.push(`⚠️ Not found: #${result.notFound.join(', #')}`);
       }
       parts.push('\nResolved memories are hidden from default search. Use status="all" to include them.');
-      parts.push('📊 Run `memorix_retention` with `action: "report"` to check remaining cleanup status.');
 
       return {
         content: [{ type: 'text' as const, text: parts.join('\n') }],
@@ -1101,17 +1081,6 @@ export async function createMemorixServer(
         { name: entityName, entityType: 'auto', observations: [] },
       ]);
 
-      // ── Attribution guard (passive, non-blocking) ─────────────────
-      let reasoningAttributionWarning = '';
-      try {
-        const attrCheck = await checkProjectAttribution(entityName, project.id, getAllObservations());
-        if (attrCheck.suspicious) {
-          reasoningAttributionWarning = `\n⚠️ Attribution notice: entity "${entityName}" has 0 observations in ` +
-            `"${project.id}" but ${attrCheck.count} in "${attrCheck.knownIn}" ` +
-            `(confidence: ${attrCheck.confidence}). Verify the correct project is bound before storing.`;
-        }
-      } catch { /* guard is best-effort — never blocks the write */ }
-
       markInternalWrite();
       const { observation: obs } = await storeObservation({
         entityName,
@@ -1125,7 +1094,6 @@ export async function createMemorixServer(
         source: 'agent',
         relatedCommits,
         relatedEntities,
-        sourceDetail: 'explicit',
       });
 
       await graphManager.addObservations([
@@ -1135,85 +1103,8 @@ export async function createMemorixServer(
       return {
         content: [{
           type: 'text' as const,
-          text: `🧠 Reasoning trace stored #${obs.id}: "${decision}"\nEntity: ${entityName} | ${facts.length} facts | ${obs.tokens} tokens${reasoningAttributionWarning}`,
+          text: `🧠 Reasoning trace stored #${obs.id}: "${decision}"\nEntity: ${entityName} | ${facts.length} facts | ${obs.tokens} tokens`,
         }],
-      };
-    },
-  );
-
-  /**
-   * memorix_audit_project — Scan for misattributed observations
-   *
-   * Read-only audit: identifies observations in the current project whose
-   * entityName is well-known in a different project but absent here.
-   * Use the results to decide which observations to archive with memorix_resolve.
-   */
-  server.registerTool(
-    'memorix_audit_project',
-    {
-      title: 'Audit Project Attribution',
-      description:
-        'Scan the current project for observations that may have been written to the wrong project bucket. ' +
-        'Identifies observations whose entityName appears exclusively in a different project. ' +
-        'Read-only — no data is changed. Use memorix_resolve to archive confirmed mis-attributed observations.',
-      inputSchema: {
-        threshold: z.number().int().min(1).optional().describe(
-          'Minimum occurrences of an entityName in another project to flag it as suspicious (default: 2)',
-        ),
-      },
-    },
-    async ({ threshold }) => {
-      const unresolved = requireResolvedProject('audit project attribution');
-      if (unresolved) return unresolved;
-
-      const minCount = threshold ?? 2;
-      let entries: import('./memory/attribution-guard.js').AuditEntry[];
-      try {
-        entries = await auditProjectObservations(project.id, getAllObservations(), minCount);
-      } catch (err) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `Audit failed: ${err instanceof Error ? err.message : String(err)}`,
-          }],
-        };
-      }
-
-      if (entries.length === 0) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `✅ No suspicious observations found in project "${project.id}" (threshold: ${minCount}).`,
-          }],
-        };
-      }
-
-      const lines: string[] = [
-        `## Attribution Audit — ${project.id}`,
-        `Found **${entries.length}** potentially mis-attributed observation(s) (threshold: ≥${minCount} occurrences in another project).\n`,
-        '| ID | Entity | Title | Source | Detail | Likely Belongs To | Count | Confidence |',
-        '|----|--------|-------|--------|--------|-------------------|-------|------------|',
-      ];
-
-      for (const e of entries) {
-        const titleTrunc = e.title.length > 50 ? e.title.slice(0, 47) + '...' : e.title;
-        lines.push(
-          `| #${e.id} | ${e.entityName} | ${titleTrunc} | ${e.source} | ${e.sourceDetail ?? '-'} | ${e.likelyBelongsTo} | ${e.count} | ${e.confidence} |`,
-        );
-      }
-
-      // Actionable IDs block (cap display to avoid very long outputs)
-      const auditIds = entries.map(e => e.id);
-      const auditPreview = auditIds.slice(0, 20);
-      const auditSummary = `[${auditPreview.join(', ')}]${auditIds.length > 20 ? ` … (${auditIds.length} total)` : ''}`;
-      lines.push('');
-      lines.push('### Suggested Actions');
-      lines.push(`Suggested IDs: ${auditSummary}`);
-      lines.push('- Archive confirmed mis-attributed observations: use `memorix_resolve` with the specific IDs above and `status: "archived"`.');
-      lines.push('- Review first with `memorix_detail` if unsure.');
-
-      return {
-        content: [{ type: 'text' as const, text: lines.join('\n') }],
       };
     },
   );
@@ -1385,20 +1276,18 @@ export async function createMemorixServer(
   );
 
   /**
-   * memorix_timeline — Deep retrieval: provenance-aware chronological expansion
+   * memorix_timeline — Layer 2: Chronological context
    *
-   * Natural follow-up after session L1 routing hints (hook traces) or L3
-   * evidence pointers (git memory). Distinguishes explicit memory evolution,
-   * hook activity traces, and git-backed facts via Src column when available.
+   * Shows observations before and after a specific anchor.
+   * Helps agents understand the temporal context of an observation.
    */
   server.registerTool(
     'memorix_timeline',
     {
       title: 'Memory Timeline',
       description:
-        'Deep retrieval: expand chronological context around a specific observation — ' +
-        'distinguishes explicit memory evolution, hook activity traces, and git-backed facts. ' +
-        'Natural follow-up after session L1 routing hints (hook traces) or L3 evidence pointers (git memory).',
+        'Get chronological context around a specific observation. ' +
+        'Shows what happened before and after the anchor observation.',
       inputSchema: {
         anchorId: z.number().describe('Observation ID to center the timeline on'),
         depthBefore: z.number().optional().describe('Number of observations before (default: 3)'),
@@ -1428,19 +1317,18 @@ export async function createMemorixServer(
   );
 
   /**
-   * memorix_detail — Layer 3: Provenance-aware full observation details
+   * memorix_detail — Layer 3: Full observation details
    *
-   * Opens explicit memories, hook traces, or git evidence depending on source.
-   * Output includes a provenance header identifying the evidence kind, value
-   * category (core / ephemeral), and cross-references to related items.
+   * Fetch complete observation content by IDs.
+   * Only call after filtering via memorix_search / memorix_timeline.
+   * ~500-1000 tokens per observation.
    */
   server.registerTool(
     'memorix_detail',
     {
       title: 'Memory Details',
       description:
-        'Fetch full observation details by ID — includes source kind (explicit memory / hook trace / git evidence), ' +
-        'value category, and cross-references (~500-1000 tokens each). ' +
+        'Fetch full observation details by IDs (~500-1000 tokens each). ' +
         'Always use memorix_search first to find relevant IDs, then fetch only what you need. ' +
         'For global search results, prefer refs with projectId to avoid cross-project ID ambiguity.',
       inputSchema: {
@@ -1497,47 +1385,19 @@ export async function createMemorixServer(
         'Show memory retention status or archive expired memories. ' +
         'action="report" (default): show active/stale/archive-candidate counts. ' +
         'action="archive": move expired observations to archive file (reversible). ' +
-        'action="stale": list stale observations with full retention explanation. ' +
         'Uses exponential decay scoring based on importance, age, and access patterns.',
       inputSchema: {
-        action: z.enum(['report', 'archive', 'stale']).optional().describe('Action: "report" (show status, default) or "archive" (move expired to archive) or "stale" (list stale observations with explanation)'),
+        action: z.enum(['report', 'archive']).optional().describe('Action: "report" (show status, default) or "archive" (move expired to archive)'),
       },
     },
     async (args: { action?: string }) => {
       const action = args.action ?? 'report';
-      const { getRetentionSummary, getArchiveCandidates, rankByRelevance, archiveExpired, getRetentionZone, explainRetention } = await import('./memory/retention.js');
-      const { getDb } = await import('./store/orama-store.js');
+      const { getRetentionSummary, getArchiveCandidates, rankByRelevance, archiveExpired } = await import('./memory/retention.js');
       const { search } = await import('@orama/orama');
-
-      // Shared: build MemorixDocument[] from in-memory observations
-      const { getAllObservations } = await import('./memory/observations.js');
-      const allObs = getAllObservations();
-
-      // Pull current access metadata from the live Orama index so access-based
-      // immunity (e.g. accessCount >= 3) still works in retention/report/archive
-      // paths even though observations.json itself does not persist those fields.
-      const accessMap = new Map<number, { accessCount: number; lastAccessedAt: string }>();
-      try {
-        const database = await getDb();
-        const accessResults = await search(database, {
-          term: '',
-          limit: Math.max(1, allObs.length),
-        });
-        for (const hit of accessResults.hits) {
-          const doc = hit.document as unknown as import('./types.js').MemorixDocument;
-          accessMap.set(doc.observationId, {
-            accessCount: doc.accessCount ?? 0,
-            lastAccessedAt: doc.lastAccessedAt ?? '',
-          });
-        }
-      } catch {
-        // Best-effort: retention still works without access metadata, just with
-        // less precise immunity/reporting.
-      }
 
       // Handle archive action
       if (action === 'archive') {
-        const result = await archiveExpired(projectDir, undefined, accessMap);
+        const result = await archiveExpired(projectDir);
         if (result.archived === 0) {
           return {
             content: [{ type: 'text' as const, text: '✅ No expired observations to archive. All memories are within their retention period.' }],
@@ -1548,6 +1408,10 @@ export async function createMemorixServer(
         };
       }
 
+      // Report action (default) — use in-memory observations for reliable lookup
+      // (Orama search with empty term is unreliable)
+      const { getAllObservations } = await import('./memory/observations.js');
+      const allObs = getAllObservations();
       const docs: import('./types.js').MemorixDocument[] = allObs.map(obs => ({
         id: `obs-${obs.id}`,
         observationId: obs.id,
@@ -1561,12 +1425,10 @@ export async function createMemorixServer(
         tokens: obs.tokens,
         createdAt: obs.createdAt,
         projectId: obs.projectId,
-        accessCount: accessMap.get(obs.id)?.accessCount ?? 0,
-        lastAccessedAt: accessMap.get(obs.id)?.lastAccessedAt ?? '',
+        accessCount: 0,
+        lastAccessedAt: '',
         status: obs.status ?? 'active',
         source: obs.source ?? 'agent',
-        sourceDetail: obs.sourceDetail ?? '',
-        valueCategory: obs.valueCategory ?? '',
       }));
 
       if (docs.length === 0) {
@@ -1575,56 +1437,11 @@ export async function createMemorixServer(
         };
       }
 
-      // ── action="stale": full table of stale observations with explanation ──
-      if (action === 'stale') {
-        const staleDocs = docs.filter(d => getRetentionZone(d) === 'stale');
-        if (staleDocs.length === 0) {
-          return {
-            content: [{ type: 'text' as const, text: '✅ No stale observations. All active memories are within 50% of their retention period.' }],
-          };
-        }
-        const staleLines: string[] = [
-          `## Stale Observations (${staleDocs.length})`,
-          '',
-          '| ID | Entity | Title | Age | Source | Retention | Why |',
-          '|----|--------|-------|-----|--------|-----------|-----|',
-        ];
-        for (const d of staleDocs) {
-          const exp = explainRetention(d);
-          const src = d.sourceDetail || '—';
-          const vc = d.valueCategory || '—';
-          staleLines.push(
-            `| ${d.observationId} | ${d.entityName} | ${d.title} | ${exp.ageDays}d | ${src} (${vc}) | ${exp.effectiveRetentionDays}d | ${exp.summary} |`,
-          );
-        }
-        staleLines.push('');
-        staleLines.push('> 💡 Stale = past 50% of effective retention. Review or access to keep; otherwise will become archive candidates.');
-
-        // Actionable IDs block
-        const staleIds = staleDocs.map(d => d.observationId);
-        staleLines.push('');
-        staleLines.push('### Suggested Actions');
-        staleLines.push(`Suggested IDs: [${staleIds.join(', ')}]`);
-        staleLines.push(`- Archive stale observations: \`memorix_resolve\` with \`ids: [${staleIds.join(', ')}]\` and \`status: "archived"\``);
-        staleLines.push('- Or review individually with `memorix_detail` before deciding.');
-
-        return {
-          content: [{ type: 'text' as const, text: staleLines.join('\n') }],
-        };
-      }
-
-      // ── action="report" (default): concise summary ──
       const summary = getRetentionSummary(docs);
       const candidates = getArchiveCandidates(docs);
       const ranked = rankByRelevance(docs);
 
-      // Source breakdown
-      const srcCounts = new Map<string, number>();
-      for (const d of docs) {
-        const key = d.sourceDetail || '(undefined)';
-        srcCounts.set(key, (srcCounts.get(key) ?? 0) + 1);
-      }
-
+      // Format output
       const lines: string[] = [
         `## Memory Retention Status`,
         ``,
@@ -1636,35 +1453,20 @@ export async function createMemorixServer(
         `| Immune | ${summary.immune} |`,
         `| **Total** | **${docs.length}** |`,
         ``,
-        `### Source Breakdown`,
-        `| Source | Count |`,
-        `|--------|-------|`,
       ];
-      for (const [src, count] of [...srcCounts.entries()].sort((a, b) => b[1] - a[1])) {
-        lines.push(`| ${src} | ${count} |`);
-      }
-      lines.push('');
 
       if (candidates.length > 0) {
         lines.push(`### Archive Candidates (${candidates.length})`);
-        lines.push(`| ID | Title | Age | Retention | Why |`);
-        lines.push(`|----|-------|-----|-----------|-----|`);
+        lines.push(`| ID | Title | Age (days) | Access |`);
+        lines.push(`|----|-------|-----------|--------|`);
         for (const c of candidates.slice(0, 10)) {
-          const exp = explainRetention(c);
-          lines.push(`| ${c.observationId} | ${c.title} | ${exp.ageDays}d | ${exp.effectiveRetentionDays}d | ${exp.summary} |`);
+          const ageDays = Math.round(
+            (Date.now() - new Date(c.createdAt).getTime()) / (1000 * 60 * 60 * 24),
+          );
+          lines.push(`| ${c.observationId} | ${c.title} | ${ageDays}d | ${c.accessCount ?? 0}× |`);
         }
-        if (candidates.length > 10) {
-          lines.push(`| … | *(${candidates.length - 10} more)* | | | |`);
-        }
-        const candidateIds = candidates.map(c => c.observationId);
         lines.push('');
-        lines.push(`Candidate IDs: [${candidateIds.slice(0, 20).join(', ')}]${candidateIds.length > 20 ? ` … (${candidateIds.length} total)` : ''}`);
-        lines.push(`> 💡 Use \`memorix_retention\` with \`action: "archive"\` to move all, or \`memorix_resolve\` with specific IDs.`);
-        lines.push('');
-      }
-
-      if (summary.stale > 0) {
-        lines.push(`> 📋 ${summary.stale} stale observation(s) — use \`memorix_retention\` with \`action: "stale"\` for full details.`);
+        lines.push(`> 💡 Use \`memorix_retention\` with \`action: "archive"\` to move these to archive.`);
         lines.push('');
       }
 
@@ -3484,6 +3286,7 @@ export async function createMemorixServer(
           if (reloading) return;
           reloading = true;
           try {
+            markIndexStale();
             await resetDb();
             await initObservations(projectDir);
             const count = await reindexObservations();
@@ -3543,6 +3346,7 @@ export async function createMemorixServer(
       loadDotenv(project.rootPath);
     } catch { /* best-effort */ }
 
+    markIndexStale();
     await initializeProjectRuntime('switch');
     return true;
   };
