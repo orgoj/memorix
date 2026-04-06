@@ -27,7 +27,6 @@ Thumbs.db
 
 # Agent configs (auto-installed by memorix hooks)
 .agent/
-.claude/
 .gemini/
 .shared/
 .codex/
@@ -53,6 +52,5 @@ temple/
 .vscode/
 *.swp
 *.swo
-.beads/beads.db
 
 .omc/
