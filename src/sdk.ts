@@ -218,7 +218,7 @@ export class MemoryClient {
   async get(id: number): Promise<Observation | undefined> {
     this._ensureOpen();
     await this._freshness.withFreshIndex(() => {});
-    return this._observations.getObservation(id, this._projectId);
+    return this._observations.getObservation(id);
   }
 
   /**

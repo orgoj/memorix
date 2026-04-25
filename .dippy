@@ -1,0 +1,6 @@
+allow npm run build
+allow memorix *
+allow git *
+
+allow-read ../memorix*/**
+allow-edit ../memorix*/**
