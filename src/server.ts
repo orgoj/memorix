@@ -49,6 +49,10 @@ import type { ExistingMemory } from './llm/memory-manager.js';
 import { runFormation, getMetricsSummary, getBeforeAfterMetrics } from './memory/formation/index.js';
 import type { FormationConfig, SearchHit, FormedMemory, FormationStage, FormationStageEvent } from './memory/formation/types.js';
 import { parseFormationTimeoutMs } from './server/formation-timeout.js';
+import {
+  describeTeamMessage,
+  buildTeamEventPayload,
+} from './team/notification-overlay.js';
 
 // ── Timeout budgets for LLM-heavy paths ──────────────────────────
 const FORMATION_TIMEOUT_MS = parseFormationTimeoutMs(process.env.MEMORIX_FORMATION_TIMEOUT_MS); // Formation pipeline (extract+resolve+evaluate)
@@ -401,17 +405,52 @@ export async function createMemorixServer(
     };
   };
 
-  // Create MCP server (or use existing one from roots-aware flow)
+  // Create MCP server (or use existing one from roots-aware flow).
+  // Logging capability must be declared up front; otherwise the MCP SDK's
+  // sendLoggingMessage() is a no-op and team push notifications are never
+  // emitted to clients.
   const server = existingServer ?? new McpServer({
     name: 'memorix',
     version: typeof __MEMORIX_VERSION__ !== 'undefined' ? __MEMORIX_VERSION__ : '1.0.1',
+  }, {
+    capabilities: { logging: {} },
   });
 
   const originalRegisterTool = server.registerTool.bind(server);
+
+  // Tools that already show inbox — skip notification hint injection
+  const TEAM_HINT_SKIP = new Set(['memorix_poll', 'team_message']);
+
   server.registerTool = ((name: string, ...args: unknown[]) => {
     if (!isToolInProfile(name, toolProfile)) {
       return undefined as never;
     }
+
+    // Wrap handler to inject unread team message hint into tool responses
+    const handlerIdx = args.length - 1;
+    const originalHandler = args[handlerIdx];
+    if (typeof originalHandler === 'function') {
+      args[handlerIdx] = async (toolArgs: unknown) => {
+        const result = await (originalHandler as (...a: unknown[]) => unknown)(toolArgs);
+        if (teamFeaturesEnabled && currentAgentId && !TEAM_HINT_SKIP.has(name)) {
+          try {
+            const unread = teamStore.getUnreadCount(project.id, currentAgentId);
+            if (unread > 0 && result && typeof result === 'object') {
+              const r = result as { content?: Array<{ type: string; text?: string }> };
+              const textBlock = r.content?.find(b => b.type === 'text' && b.text);
+              if (textBlock) {
+                const count = Math.min(unread, 99);
+                textBlock.text += `\n[NOTIFICATION] ${count} unread team message(s). Use team_message inbox or memorix_poll.`;
+              }
+            }
+          } catch (err) {
+            console.error('[memorix] Team notification hint failed:', (err as Error)?.message ?? err);
+          }
+        }
+        return result;
+      };
+    }
+
     return (originalRegisterTool as (...innerArgs: unknown[]) => unknown)(name, ...args) as never;
   }) as typeof server.registerTool;
 
@@ -3304,7 +3343,9 @@ export async function createMemorixServer(
       if (action === 'leave') {
         if (!agentId) return { content: [{ type: 'text' as const, text: 'agentId is required for leave' }], isError: true };
         const left = teamStore.leaveAgent(agentId);
-        if (currentAgentId === agentId) currentAgentId = undefined;
+        if (currentAgentId === agentId) {
+          currentAgentId = undefined;
+        }
         if (!left) return { content: [{ type: 'text' as const, text: 'Agent not found' }] };
         const releasedLocks = teamStore.releaseAllLocks(agentId);
         const releasedTasks = teamStore.releaseTasksByAgent(agentId);
@@ -3543,6 +3584,14 @@ export async function createMemorixServer(
           handoffStatus: handoffStatus ?? (msgType === 'handoff' ? 'open' : null),
         });
         if ('error' in msg) return { content: [{ type: 'text' as const, text: `[ERROR] ${msg.error}` }], isError: true };
+        const sender = teamStore.getAgent(from);
+        try {
+          await server.server.sendLoggingMessage({
+            level: 'info',
+            logger: 'memorix.team',
+            data: buildTeamEventPayload(msg, { senderName: sender?.name }),
+          });
+        } catch { /* best effort — never block message delivery */ }
         const target = to ? `agent ${to.slice(0, 8)}…` : `role ${toRole}`;
         return { content: [{ type: 'text' as const, text: `Message sent (${msgType}) to ${target} | ID: ${msg.id.slice(0, 8)}…${toRole ? ` [role: ${toRole}]` : ''}` }] };
       }
@@ -3557,6 +3606,14 @@ export async function createMemorixServer(
           content,
         });
         if ('error' in msg) return { content: [{ type: 'text' as const, text: `[ERROR] ${msg.error}` }], isError: true };
+        const sender = teamStore.getAgent(from);
+        try {
+          await server.server.sendLoggingMessage({
+            level: 'info',
+            logger: 'memorix.team',
+            data: buildTeamEventPayload(msg, { senderName: sender?.name }),
+          });
+        } catch { /* best effort — never block message delivery */ }
         return { content: [{ type: 'text' as const, text: `Broadcast (${msgType}) | ID: ${msg.id.slice(0, 8)}…` }] };
       }
       // inbox
