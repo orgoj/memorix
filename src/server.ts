@@ -214,6 +214,8 @@ export interface CreateMemorixServerOptions {
   dashboardMode?: 'standalone' | 'control-plane';
   dashboardPort?: number;
   toolProfile?: ToolProfile;
+  /** Cross-session notification callback (set by serve-http for multi-session broadcast). */
+  onTeamEvent?: (event: { level: 'error' | 'critical' | 'info' | 'debug' | 'notice' | 'warning' | 'alert' | 'emergency'; logger: string; data: Record<string, unknown> }) => Promise<void>;
 }
 
 export async function createMemorixServer(
@@ -3618,11 +3620,14 @@ export async function createMemorixServer(
         if ('error' in msg) return { content: [{ type: 'text' as const, text: `[ERROR] ${msg.error}` }], isError: true };
         const sender = teamStore.getAgent(from);
         try {
-          await server.server.sendLoggingMessage({
-            level: 'info',
+          const teamEvent = {
+            level: 'info' as const,
             logger: 'memorix.team',
             data: buildTeamEventPayload(msg, { senderName: sender?.name }),
-          });
+          };
+          await (options.onTeamEvent
+            ? options.onTeamEvent(teamEvent)
+            : server.server.sendLoggingMessage(teamEvent));
         } catch { /* best effort — never block message delivery */ }
         const recipient = teamStore.getAgent(resolvedTo ?? '');
         const targetLabel = recipient ? `${recipient.name}` : (to ? `agent ${to.slice(0, 8)}…` : `role ${toRole}`);
@@ -3643,11 +3648,14 @@ export async function createMemorixServer(
         if ('error' in msg) return { content: [{ type: 'text' as const, text: `[ERROR] ${msg.error}` }], isError: true };
         const sender = teamStore.getAgent(from);
         try {
-          await server.server.sendLoggingMessage({
-            level: 'info',
+          const teamEvent = {
+            level: 'info' as const,
             logger: 'memorix.team',
             data: buildTeamEventPayload(msg, { senderName: sender?.name }),
-          });
+          };
+          await (options.onTeamEvent
+            ? options.onTeamEvent(teamEvent)
+            : server.server.sendLoggingMessage(teamEvent));
         } catch { /* best effort — never block message delivery */ }
         return { content: [{ type: 'text' as const, text: `Broadcast (${msgType}) | ID: ${msg.id.slice(0, 8)}…` }] };
       }

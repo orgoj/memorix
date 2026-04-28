@@ -136,6 +136,21 @@ export default defineCommand({
     // Session map: sessionId → transport + per-session server state
     const sessions = new Map<string, SessionState>();
 
+    /**
+     * Broadcast a team event to ALL active sessions via sendLoggingMessage().
+     * Uses Promise.allSettled so one dead transport never blocks others.
+     */
+    async function broadcastToAllSessions(event: {
+      level: 'error' | 'critical' | 'info' | 'debug' | 'notice' | 'warning' | 'alert' | 'emergency';
+      logger: string;
+      data: Record<string, unknown>;
+    }) {
+      const targets = Array.from(sessions.values());
+      await Promise.allSettled(targets.map(async (state) => {
+        try { await state.server.server.sendLoggingMessage(event); } catch { /* best effort */ }
+      }));
+    }
+
     // Session activity tracking (for GC timeout)
     const sessionLastActivity = new Map<string, number>();
 
@@ -380,6 +395,7 @@ export default defineCommand({
             dashboardMode: 'control-plane',
             dashboardPort: port,
             toolProfile,
+            onTeamEvent: broadcastToAllSessions,
           },
         );
         createdState = { transport, server, switchProject, isExplicitlyBound };
