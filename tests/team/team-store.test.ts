@@ -699,4 +699,207 @@ describe('TeamStore', () => {
       expect(updated.last_seen_obs_generation).toBe(42);
     });
   });
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Management Operations (delete, gc, force-leave, update)
+  // ═══════════════════════════════════════════════════════════════════
+
+  describe('Management Operations', () => {
+    const projectId = 'mgmt-proj';
+
+    function setupTeam() {
+      const a1 = store.registerAgent({ projectId, agentType: 'claude-code', instanceId: 'inst-1', name: 'Agent1', role: 'engineer', capabilities: ['code'] });
+      const a2 = store.registerAgent({ projectId, agentType: 'cursor', instanceId: 'inst-2', name: 'Agent2', role: 'reviewer' });
+      const a3 = store.registerAgent({ projectId, agentType: 'codex', instanceId: 'inst-3', name: 'Agent3' });
+      return { a1, a2, a3 };
+    }
+
+    // ── deleteAgent ──────────────────────────────────────────────────
+
+    it('should permanently delete an agent', () => {
+      const { a1 } = setupTeam();
+      expect(store.deleteAgent(a1.agent_id, projectId)).toBe(true);
+      expect(store.getAgent(a1.agent_id)).toBeUndefined();
+    });
+
+    it('should refuse to delete agent from wrong project', () => {
+      const { a1 } = setupTeam();
+      expect(store.deleteAgent(a1.agent_id, 'wrong-project')).toBe(false);
+      expect(store.getAgent(a1.agent_id)).toBeDefined();
+    });
+
+    it('should cascade delete messages when agent is deleted', () => {
+      const { a1, a2 } = setupTeam();
+      store.sendMessage({ projectId, senderAgentId: a1.agent_id, recipientAgentId: a2.agent_id, type: 'info', content: 'hello' });
+      store.sendMessage({ projectId, senderAgentId: a2.agent_id, recipientAgentId: a1.agent_id, type: 'info', content: 'reply' });
+
+      store.deleteAgent(a1.agent_id, projectId);
+
+      // Sender messages deleted
+      const msgs = store.listMessages(projectId);
+      expect(msgs.every(m => m.sender_agent_id !== a1.agent_id)).toBe(true);
+      // Recipient inbox messages deleted
+      expect(msgs.every(m => m.recipient_agent_id !== a1.agent_id)).toBe(true);
+    });
+
+    it('should release locks when agent is deleted', () => {
+      const { a1 } = setupTeam();
+      store.acquireLock(projectId, '/src/foo.ts', a1.agent_id);
+      store.deleteAgent(a1.agent_id, projectId);
+      expect(store.getLockStatus(projectId, '/src/foo.ts')).toBeNull();
+    });
+
+    it('should release tasks when agent is deleted', () => {
+      const { a1 } = setupTeam();
+      const task = store.createTask({ projectId, description: 'do work' });
+      store.claimTask(task.task_id, a1.agent_id);
+
+      store.deleteAgent(a1.agent_id, projectId);
+
+      const t = store.getTask(task.task_id);
+      expect(t!.status).toBe('pending');
+      expect(t!.assignee_agent_id).toBeNull();
+    });
+
+    // ── deleteAgentsByProject ────────────────────────────────────────
+
+    it('should only delete inactive agents in bulk', () => {
+      const { a1, a2, a3 } = setupTeam();
+      store.leaveAgent(a2.agent_id); // a2 becomes inactive
+      const deleted = store.deleteAgentsByProject(projectId);
+      expect(deleted).toBe(1);
+      expect(store.getAgent(a1.agent_id)).toBeDefined(); // active, kept
+      expect(store.getAgent(a2.agent_id)).toBeUndefined(); // inactive, deleted
+      expect(store.getAgent(a3.agent_id)).toBeDefined(); // active, kept
+    });
+
+    // ── deleteTeam ───────────────────────────────────────────────────
+
+    it('should wipe all team data for a project', () => {
+      const { a1, a2 } = setupTeam();
+      store.sendMessage({ projectId, senderAgentId: a1.agent_id, recipientAgentId: a2.agent_id, type: 'info', content: 'hello' });
+      store.createTask({ projectId, description: 'task1' });
+      store.acquireLock(projectId, '/src/bar.ts', a1.agent_id);
+
+      const result = store.deleteTeam(projectId);
+      expect(result.agents).toBe(3);
+      expect(result.messages).toBe(1);
+      expect(result.tasks).toBe(1);
+      expect(result.locks).toBe(1);
+
+      expect(store.listAgents(projectId)).toHaveLength(0);
+      expect(store.listMessages(projectId)).toHaveLength(0);
+      expect(store.listTasks(projectId)).toHaveLength(0);
+    });
+
+    // ── forceLeaveAgent ──────────────────────────────────────────────
+
+    it('should force leave an active agent, releasing tasks and locks', () => {
+      const { a1 } = setupTeam();
+      const task = store.createTask({ projectId, description: 'do work' });
+      store.claimTask(task.task_id, a1.agent_id);
+      store.acquireLock(projectId, '/src/baz.ts', a1.agent_id);
+
+      const result = store.forceLeaveAgent(a1.agent_id);
+      expect(result.success).toBe(true);
+      expect(result.releasedTasks).toBe(1);
+      expect(result.releasedLocks).toBe(1);
+
+      const agent = store.getAgent(a1.agent_id);
+      expect(agent!.status).toBe('inactive');
+
+      const t = store.getTask(task.task_id);
+      expect(t!.assignee_agent_id).toBeNull();
+      expect(store.getLockStatus(projectId, '/src/baz.ts')).toBeNull();
+    });
+
+    it('should return false for force-leaving non-existent agent', () => {
+      const result = store.forceLeaveAgent('non-existent');
+      expect(result.success).toBe(false);
+    });
+
+    // ── updateAgentCapabilities ──────────────────────────────────────
+
+    it('should update agent capabilities', () => {
+      const { a1 } = setupTeam();
+      expect(store.updateAgentCapabilities(a1.agent_id, ['code', 'review'])).toBe(true);
+      const agent = store.getAgent(a1.agent_id);
+      expect(JSON.parse(agent!.capabilities!)).toEqual(['code', 'review']);
+    });
+
+    // ── updateAgentRole ──────────────────────────────────────────────
+
+    it('should update agent role', () => {
+      const { a1 } = setupTeam();
+      expect(store.updateAgentRole(a1.agent_id, 'planner')).toBe(true);
+      const agent = store.getAgent(a1.agent_id);
+      expect(agent!.role).toBe('planner');
+    });
+
+    // ── listMessages ─────────────────────────────────────────────────
+
+    it('should list all messages for a project', () => {
+      const { a1, a2 } = setupTeam();
+      store.sendMessage({ projectId, senderAgentId: a1.agent_id, recipientAgentId: a2.agent_id, type: 'info', content: 'hello' });
+      store.sendMessage({ projectId, senderAgentId: a2.agent_id, recipientAgentId: a1.agent_id, type: 'info', content: 'reply' });
+      const msgs = store.listMessages(projectId);
+      expect(msgs).toHaveLength(2);
+    });
+
+    it('should filter messages by sender', () => {
+      const { a1, a2 } = setupTeam();
+      store.sendMessage({ projectId, senderAgentId: a1.agent_id, recipientAgentId: a2.agent_id, type: 'info', content: 'hello' });
+      store.sendMessage({ projectId, senderAgentId: a2.agent_id, recipientAgentId: a1.agent_id, type: 'info', content: 'reply' });
+      const msgs = store.listMessages(projectId, { senderId: a1.agent_id });
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].sender_agent_id).toBe(a1.agent_id);
+    });
+
+    it('should filter messages by type', () => {
+      const { a1, a2 } = setupTeam();
+      store.sendMessage({ projectId, senderAgentId: a1.agent_id, recipientAgentId: a2.agent_id, type: 'info', content: 'hello' });
+      store.sendMessage({ projectId, senderAgentId: a2.agent_id, recipientAgentId: a1.agent_id, type: 'request', content: 'do work' });
+      const msgs = store.listMessages(projectId, { type: 'request' });
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].type).toBe('request');
+    });
+
+    it('should filter messages by date range', () => {
+      const { a1, a2 } = setupTeam();
+      store.sendMessage({ projectId, senderAgentId: a1.agent_id, recipientAgentId: a2.agent_id, type: 'info', content: 'old' });
+      const msgs = store.listMessages(projectId, { since: Date.now() + 100000 });
+      expect(msgs).toHaveLength(0);
+    });
+
+    it('should limit results', () => {
+      const { a1, a2 } = setupTeam();
+      for (let i = 0; i < 10; i++) {
+        store.sendMessage({ projectId, senderAgentId: a1.agent_id, recipientAgentId: a2.agent_id, type: 'info', content: `msg-${i}` });
+      }
+      const msgs = store.listMessages(projectId, { limit: 3 });
+      expect(msgs).toHaveLength(3);
+    });
+
+    // ── gcStaleAgents ────────────────────────────────────────────────
+
+    it('should permanently delete inactive agents older than threshold', () => {
+      const { a1, a2 } = setupTeam();
+      store.leaveAgent(a2.agent_id);
+
+      const deleted = store.gcStaleAgents(projectId, 0); // threshold=0 means delete all inactive
+      expect(deleted).toBe(1);
+      expect(store.getAgent(a2.agent_id)).toBeUndefined();
+      expect(store.getAgent(a1.agent_id)).toBeDefined(); // active, kept
+    });
+
+    it('should not delete recently inactive agents', () => {
+      const { a1, a2 } = setupTeam();
+      store.leaveAgent(a2.agent_id);
+
+      // Very large threshold = only delete agents inactive for a very long time
+      const deleted = store.gcStaleAgents(projectId, 999999999999);
+      expect(deleted).toBe(0);
+      expect(store.getAgent(a2.agent_id)).toBeDefined();
+    });
+  });
 });

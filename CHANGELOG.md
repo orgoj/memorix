@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.10] - 2026-04-28
+
+### Added -- Team Management Dashboard & Backend
+- **TeamStore management methods** — `deleteAgent`, `deleteAgentsByProject`, `deleteTeam`, `forceLeaveAgent`, `updateAgentCapabilities`, `updateAgentRole`, `listMessages`, `gcStaleAgents` — all with prepared statements, project-scoping, and atomic transactions.
+- **Dashboard REST API write endpoints** — 8 POST endpoints + 1 GET for team management mutations (delete agent, delete inactive, delete team, force-leave, update role/capabilities, GC, message listing). All scoped to current project.
+- **Dashboard management UI** — Delete and force-leave buttons on agent rows, "Cleanup Inactive" and "GC" bulk actions in agents panel, "Reset Team" destructive action with double-confirm. Delegated event listeners for XSS safety. Touch-accessible via `@media (hover: none)`.
+- **New event types** — `agent:deleted`, `agent:forced-left`, `team:deleted` on TeamEventBus.
+
+### Fixed -- CCG Review
+- **Critical route shadowing** — POST management endpoints moved before the `/api/team` snapshot GET handler.
+- **Critical XSS fix** — Replaced inline `onclick` string interpolation with `data-action` attributes and delegated `addEventListener`.
+- **Project-scoping** — `forceLeaveAgent`, `updateAgentRole`, `updateAgentCapabilities` now validate `projectId`.
+- **FK safety** — `deleteAgent` nullifies `created_by` on tasks within the delete transaction.
+- **Atomicity** — `forceLeaveAgent` wrapped in `db.transaction()`.
+- **Touch accessibility** — Action buttons always visible on touch devices via CSS media query.
+
 ## [1.0.9] - 2026-04-28
 
 ### Added -- Cross-Project Agent Communication

@@ -164,6 +164,14 @@ export class TeamStore {
   private stmtLockDeleteByAgent: any = null;
   private stmtLockDeleteExpired: any = null;
 
+  // ── Delete / management prepared statements
+  private stmtAgentDelete: any = null;
+  private stmtAgentDeleteInactiveByProject: any = null;
+  private stmtAgentUpdateCapabilities: any = null;
+  private stmtAgentUpdateRole: any = null;
+  private stmtMsgDeleteBySender: any = null;
+  private stmtMsgDeleteByRecipient: any = null;
+
   // ── Name resolution prepared statements
   private stmtAgentFindByName: any = null;
 
@@ -183,6 +191,7 @@ export class TeamStore {
     this.prepareTaskStatements();
     this.prepareLockStatements();
     this.prepareRoleStatements();
+    this.prepareManagementStatements();
 
     // Seed default roles for this project if none exist
     this.seedDefaultRoles(dataDir);
@@ -939,6 +948,206 @@ export class TeamStore {
   cleanExpiredLocks(projectId: string): number {
     const info = this.stmtLockDeleteExpired.run(projectId, Date.now());
     return info.changes;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Management Statements (delete, gc, update)
+  // ═══════════════════════════════════════════════════════════════════
+
+  private prepareManagementStatements(): void {
+    this.stmtAgentDelete = this.db.prepare(
+      `DELETE FROM team_agents WHERE agent_id = ?`
+    );
+    this.stmtAgentDeleteInactiveByProject = this.db.prepare(
+      `DELETE FROM team_agents WHERE project_id = ? AND status = 'inactive'`
+    );
+    this.stmtAgentUpdateCapabilities = this.db.prepare(
+      `UPDATE team_agents SET capabilities = ? WHERE agent_id = ?`
+    );
+    this.stmtAgentUpdateRole = this.db.prepare(
+      `UPDATE team_agents SET role = ? WHERE agent_id = ?`
+    );
+    this.stmtMsgDeleteBySender = this.db.prepare(
+      `DELETE FROM team_messages WHERE sender_agent_id = ?`
+    );
+    this.stmtMsgDeleteByRecipient = this.db.prepare(
+      `DELETE FROM team_messages WHERE recipient_agent_id = ?`
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Management Operations (delete, gc, force-leave, update)
+  // ═══════════════════════════════════════════════════════════════════
+
+  /**
+   * Permanently delete an agent and all associated data.
+   * Removes: sent messages, inbox messages, locks, releases tasks, nullifies created_by, then agent row.
+   * Must be scoped to projectId for security.
+   */
+  deleteAgent(agentId: string, projectId: string): boolean {
+    const agent = this.stmtAgentFindById.get(agentId) as TeamAgentRow | undefined;
+    if (!agent || agent.project_id !== projectId) return false;
+
+    const deleteTx = this.db.transaction(() => {
+      this.stmtMsgDeleteBySender.run(agentId);
+      this.stmtMsgDeleteByRecipient.run(agentId);
+      this.stmtLockDeleteByAgent.run(agentId);
+      this.stmtTaskReleaseByAgent.run(Date.now(), agentId);
+      // Nullify created_by on tasks authored by this agent (FK safety)
+      this.db.prepare(`UPDATE team_tasks SET created_by = NULL WHERE created_by = ?`).run(agentId);
+      this.stmtAgentDelete.run(agentId);
+    });
+
+    deleteTx();
+    this.eventBus?.emit('agent:deleted', { agentId, projectId });
+    return true;
+  }
+
+  /**
+   * Bulk delete all inactive agents for a project.
+   * Returns count of agents deleted.
+   */
+  deleteAgentsByProject(projectId: string): number {
+    const inactiveAgents = (this.listAgents(projectId, { status: 'inactive' }) as TeamAgentRow[]);
+    let count = 0;
+    for (const agent of inactiveAgents) {
+      if (this.deleteAgent(agent.agent_id, projectId)) count++;
+    }
+    return count;
+  }
+
+  /**
+   * Delete all team data for a project (agents, messages, tasks, deps, locks, roles).
+   * Runs inside a transaction.
+   */
+  deleteTeam(projectId: string): { agents: number; messages: number; tasks: number; locks: number; roles: number } {
+    const result = this.db.transaction(() => {
+      const agents = this.db.prepare(`SELECT COUNT(*) AS cnt FROM team_agents WHERE project_id = ?`).get(projectId) as { cnt: number };
+      const messages = this.db.prepare(`SELECT COUNT(*) AS cnt FROM team_messages WHERE project_id = ?`).get(projectId) as { cnt: number };
+      const tasks = this.db.prepare(`SELECT task_id FROM team_tasks WHERE project_id = ?`).all(projectId) as { task_id: string }[];
+      const locks = this.db.prepare(`SELECT COUNT(*) AS cnt FROM team_locks WHERE project_id = ?`).get(projectId) as { cnt: number };
+      const roles = this.db.prepare(`SELECT COUNT(*) AS cnt FROM team_roles WHERE project_id = ?`).get(projectId) as { cnt: number };
+
+      // Delete task deps for project tasks
+      if (tasks.length > 0) {
+        const taskIds = tasks.map(t => t.task_id);
+        const placeholders = taskIds.map(() => '?').join(',');
+        this.db.prepare(`DELETE FROM team_task_deps WHERE task_id IN (${placeholders})`).run(...taskIds);
+      }
+
+      this.db.prepare(`DELETE FROM team_messages WHERE project_id = ?`).run(projectId);
+      this.db.prepare(`DELETE FROM team_tasks WHERE project_id = ?`).run(projectId);
+      this.db.prepare(`DELETE FROM team_locks WHERE project_id = ?`).run(projectId);
+      this.db.prepare(`DELETE FROM team_agents WHERE project_id = ?`).run(projectId);
+      this.db.prepare(`DELETE FROM team_roles WHERE project_id = ?`).run(projectId);
+
+      return { agents: agents.cnt, messages: messages.cnt, tasks: tasks.length, locks: locks.cnt, roles: roles.cnt };
+    })();
+
+    this.eventBus?.emit('team:deleted', { projectId });
+    return result;
+  }
+
+  /**
+   * Admin force-leave: mark agent inactive, release tasks and locks.
+   * Atomic transaction, scoped to projectId.
+   */
+  forceLeaveAgent(agentId: string, projectId?: string): { success: boolean; releasedTasks: number; releasedLocks: number } {
+    const agent = this.stmtAgentFindById.get(agentId) as TeamAgentRow | undefined;
+    if (!agent) return { success: false, releasedTasks: 0, releasedLocks: 0 };
+    if (projectId && agent.project_id !== projectId) return { success: false, releasedTasks: 0, releasedLocks: 0 };
+
+    const result = this.db.transaction(() => {
+      this.stmtAgentLeave.run(Date.now(), agentId);
+      const taskInfo = this.stmtTaskReleaseByAgent.run(Date.now(), agentId);
+      const lockInfo = this.stmtLockDeleteByAgent.run(agentId);
+      return { releasedTasks: taskInfo.changes, releasedLocks: lockInfo.changes };
+    })();
+
+    this.eventBus?.emit('agent:forced-left', { agentId, projectId: agent.project_id, releasedTasks: result.releasedTasks, releasedLocks: result.releasedLocks });
+    return { success: true, ...result };
+  }
+
+  /**
+   * Update capabilities on an existing agent. Optionally scoped to projectId.
+   */
+  updateAgentCapabilities(agentId: string, capabilities: string[], projectId?: string): boolean {
+    if (projectId) {
+      const agent = this.stmtAgentFindById.get(agentId) as TeamAgentRow | undefined;
+      if (!agent || agent.project_id !== projectId) return false;
+    }
+    const info = this.stmtAgentUpdateCapabilities.run(JSON.stringify(capabilities), agentId);
+    return info.changes > 0;
+  }
+
+  /**
+   * Promote/demote an agent's role. Optionally scoped to projectId.
+   */
+  updateAgentRole(agentId: string, role: string, projectId?: string): boolean {
+    if (projectId) {
+      const agent = this.stmtAgentFindById.get(agentId) as TeamAgentRow | undefined;
+      if (!agent || agent.project_id !== projectId) return false;
+    }
+    const info = this.stmtAgentUpdateRole.run(role, agentId);
+    return info.changes > 0;
+  }
+
+  /**
+   * General message listing with optional filters.
+   * Used by the dashboard message viewer.
+   */
+  listMessages(projectId: string, filter?: { senderId?: string; recipientId?: string; type?: string; since?: number; until?: number; limit?: number }): TeamMessageRow[] {
+    let sql = `SELECT * FROM team_messages WHERE project_id = ?`;
+    const params: any[] = [projectId];
+
+    if (filter?.senderId) {
+      sql += ` AND sender_agent_id = ?`;
+      params.push(filter.senderId);
+    }
+    if (filter?.recipientId) {
+      sql += ` AND recipient_agent_id = ?`;
+      params.push(filter.recipientId);
+    }
+    if (filter?.type) {
+      sql += ` AND type = ?`;
+      params.push(filter.type);
+    }
+    if (filter?.since) {
+      sql += ` AND created_at >= ?`;
+      params.push(filter.since);
+    }
+    if (filter?.until) {
+      sql += ` AND created_at <= ?`;
+      params.push(filter.until);
+    }
+
+    sql += ` ORDER BY created_at DESC`;
+
+    if (filter?.limit) {
+      sql += ` LIMIT ?`;
+      params.push(filter.limit);
+    }
+
+    return this.db.prepare(sql).all(...params) as TeamMessageRow[];
+  }
+
+  /**
+   * Permanent garbage collection of inactive agents older than threshold.
+   * Returns count of agents deleted.
+   */
+  gcStaleAgents(projectId: string, olderThanMs: number): number {
+    const threshold = Date.now() - olderThanMs;
+    const inactiveAgents = (this.listAgents(projectId, { status: 'inactive' }) as TeamAgentRow[])
+      .filter(a => {
+        const leftAt = a.left_at ?? a.last_heartbeat;
+        return leftAt <= threshold;
+      });
+
+    let count = 0;
+    for (const agent of inactiveAgents) {
+      if (this.deleteAgent(agent.agent_id, projectId)) count++;
+    }
+    return count;
   }
 
   // ═══════════════════════════════════════════════════════════════════

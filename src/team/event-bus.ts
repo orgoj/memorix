@@ -21,7 +21,10 @@ export interface TeamEventMap {
   'task:released':  { taskId: string; projectId: string; agentId: string };
   'agent:joined':   { agentId: string; projectId: string; agentType: string };
   'agent:left':     { agentId: string; projectId: string };
-  'agent:stale':    { agentId: string; projectId: string; releasedTasks: number };
+  'agent:stale':       { agentId: string; projectId: string; releasedTasks: number };
+  'agent:deleted':     { agentId: string; projectId: string };
+  'agent:forced-left': { agentId: string; projectId: string; releasedTasks: number; releasedLocks: number };
+  'team:deleted':      { projectId: string };
   'handoff:created':{ observationId: number; projectId: string; fromAgent: string; toAgent?: string; taskId?: string };
 }
 

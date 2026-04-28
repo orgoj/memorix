@@ -242,6 +242,21 @@ const i18n = {
     teamNoActiveNow: 'No active autonomous agents right now',
     teamNoRecent: 'No autonomous agents seen in the last 7 days',
     teamSummaryHint: 'Only explicit autonomous agent identities appear here. Historical rows are collapsed by default.',
+    // Management actions
+    teamDeleteAgent: 'Delete',
+    teamDeleteConfirm: 'Permanently delete agent "%name%"?',
+    teamForceLeave: 'Force Leave',
+    teamForceLeaveConfirm: 'Force agent "%name%" to leave? This releases their tasks and locks.',
+    teamResetTeam: 'Reset Team',
+    teamResetConfirm: 'Delete ALL team data for this project? This cannot be undone.',
+    teamResetDoubleConfirm: 'Type the project name to confirm:',
+    teamCleanupInactive: 'Cleanup Inactive',
+    teamCleanupConfirm: 'Permanently delete %count% inactive agent(s)?',
+    teamGC: 'GC',
+    teamGCConfirm: 'Run garbage collection for agents inactive more than 7 days?',
+    teamChangeRole: 'Change Role',
+    teamActionDone: 'Done',
+    teamActionFailed: 'Failed',
     // Resume area
     resumeTitle: 'Continue This Project',
     resumeDesc: 'Pick up where you left off',
@@ -612,6 +627,21 @@ const i18n = {
     teamNoActiveNow: '当前无活跃自主 agent',
     teamNoRecent: '最近 7 天无自主 agent 活动',
     teamSummaryHint: '这里只显示显式自主 agent 身份。历史数据默认折叠。',
+    // Management actions
+    teamDeleteAgent: '删除',
+    teamDeleteConfirm: '永久删除 Agent "%name%"？',
+    teamForceLeave: '强制离开',
+    teamForceLeaveConfirm: '强制 Agent "%name%" 离开？这将释放其任务和文件锁。',
+    teamResetTeam: '重置团队',
+    teamResetConfirm: '删除此项目的所有团队数据？此操作不可撤销。',
+    teamResetDoubleConfirm: '输入项目名称以确认：',
+    teamCleanupInactive: '清理不活跃',
+    teamCleanupConfirm: '永久删除 %count% 个不活跃 Agent？',
+    teamGC: 'GC',
+    teamGCConfirm: '对超过 7 天不活跃的 Agent 执行垃圾回收？',
+    teamChangeRole: '更改角色',
+    teamActionDone: '完成',
+    teamActionFailed: '失败',
     // Resume area
     resumeTitle: '继续此项目',
     resumeDesc: '从上次中断处继续',
@@ -3262,6 +3292,10 @@ async function loadTeam() {
           <span class="iconify" data-icon="lucide:refresh-cw" style="font-size:14px;"></span>
           ${t('teamRefresh')}
         </button>
+        <button class="team-reset-btn" onclick="teamReset()">
+          <span class="iconify" data-icon="lucide:trash-2" style="font-size:14px;"></span>
+          ${t('teamResetTeam')}
+        </button>
       </div>
     </div>
 
@@ -3370,6 +3404,8 @@ async function loadTeam() {
             <button class="filter-btn${teamTierFilter === 'recent' ? ' active' : ''}" onclick="teamTierFilter='recent';delete loaded['team'];loadTeam();" style="padding:4px 10px;font-size:11px;">${t('teamTierRecent')} (${recentCount})</button>
             <button class="filter-btn${teamTierFilter === 'historical' ? ' active' : ''}" onclick="teamTierFilter='historical';delete loaded['team'];loadTeam();" style="padding:4px 10px;font-size:11px;">${t('teamTierHistorical')} (${historicalCount})</button>
             <button class="filter-btn${teamTierFilter === 'all' ? ' active' : ''}" onclick="teamTierFilter='all';delete loaded['team'];loadTeam();" style="padding:4px 10px;font-size:11px;">${t('teamTierAll')} (${totalAgents})</button>
+            <button class="team-gc-btn" onclick="teamCleanupInactive()" title="${t('teamCleanupInactive')}">${t('teamCleanupInactive')}</button>
+            <button class="team-gc-btn" onclick="teamGarbageCollect()" title="${t('teamGC')}">${t('teamGC')}</button>
           </div>
         </div>
         <div class="panel-body team-scrollable">
@@ -3399,6 +3435,10 @@ async function loadTeam() {
                 </div>
                 ${a.unread > 0 ? '<span class="team-unread-badge">' + a.unread + '</span>' : ''}
                 <span class="team-agent-id">${(a.id || '').slice(0, 8)}</span>
+                <div class="team-agent-actions">
+                  ${a.status === 'active' ? '<button class="team-action-btn" data-action="force-leave" data-agent-id="' + escapeHtml(a.id) + '" data-agent-name="' + escapeHtml(a.name) + '" title="' + t('teamForceLeave') + '"><span class="iconify" data-icon="lucide:log-out" style="font-size:13px;"></span></button>' : ''}
+                  ${a.status !== 'active' ? '<button class="team-action-btn team-danger-btn" data-action="delete-agent" data-agent-id="' + escapeHtml(a.id) + '" data-agent-name="' + escapeHtml(a.name) + '" title="' + t('teamDeleteAgent') + '"><span class="iconify" data-icon="lucide:trash-2" style="font-size:13px;"></span></button>' : ''}
+                </div>
               </div>`;
               }).join('')
           }
@@ -3495,6 +3535,17 @@ async function loadTeam() {
 
   container.innerHTML = html;
 
+  // Delegated event listener for team action buttons (avoids XSS from inline onclick)
+  container.addEventListener('click', function(e) {
+    const btn = e.target.closest('[data-action]');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    const agentId = btn.dataset.agentId || '';
+    const agentName = btn.dataset.agentName || '';
+    if (action === 'delete-agent') teamDeleteAgent(agentId, agentName);
+    else if (action === 'force-leave') teamForceLeave(agentId, agentName);
+  });
+
   // Show last refresh time
   const indicator = document.getElementById('team-refresh-indicator');
   if (indicator) indicator.textContent = new Date().toLocaleTimeString();
@@ -3505,6 +3556,54 @@ async function loadTeam() {
     if (currentPage === 'team') loadTeam();
     else { clearInterval(teamRefreshTimer); teamRefreshTimer = null; }
   }, 5000);
+}
+
+// ── Team management action handlers ──────────────────────────
+
+async function teamPostAction(endpoint, body) {
+  const res = await fetch('/api/team/' + endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return res.json();
+}
+
+function teamDeleteAgent(agentId, name) {
+  if (!confirm(t('teamDeleteConfirm').replace('%name%', name))) return;
+  teamPostAction('agents/delete', { agentId }).then(r => {
+    if (r.ok) loadTeam();
+  });
+}
+
+function teamForceLeave(agentId, name) {
+  if (!confirm(t('teamForceLeaveConfirm').replace('%name%', name))) return;
+  teamPostAction('agents/force-leave', { agentId }).then(r => {
+    if (r.ok) loadTeam();
+  });
+}
+
+function teamCleanupInactive() {
+  if (!confirm(t('teamCleanupConfirm').replace('%count%', 'all inactive'))) return;
+  teamPostAction('agents/delete-inactive', {}).then(r => {
+    if (r.ok) { delete loaded['team']; loadTeam(); }
+  });
+}
+
+function teamGarbageCollect() {
+  if (!confirm(t('teamGCConfirm'))) return;
+  teamPostAction('gc', {}).then(r => {
+    if (r.ok) { delete loaded['team']; loadTeam(); }
+  });
+}
+
+function teamReset() {
+  if (!confirm(t('teamResetConfirm'))) return;
+  const name = prompt(t('teamResetDoubleConfirm'));
+  if (!name) return;
+  teamPostAction('delete', {}).then(r => {
+    if (r.ok) { delete loaded['team']; loadTeam(); }
+  });
 }
 
 // ============================================================

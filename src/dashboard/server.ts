@@ -899,6 +899,79 @@ export async function startDashboard(
             return;
         }
 
+        // ── Team management mutation endpoints (checked BEFORE snapshot GET) ──
+        if (url.startsWith('/api/team/') && req.method === 'POST') {
+            try {
+                const { initTeamStore } = await import('../team/team-store.js');
+                const teamStore = await initTeamStore(state.dataDir);
+                const body = JSON.parse(await readBody(req));
+                const pid = state.projectId;
+
+                if (url === '/api/team/agents/delete') {
+                    if (body.agentIds && Array.isArray(body.agentIds)) {
+                        let count = 0;
+                        for (const id of body.agentIds) { if (teamStore.deleteAgent(id, pid)) count++; }
+                        sendJson(res, { ok: true, deleted: count });
+                    } else if (body.agentId) {
+                        sendJson(res, { ok: true, deleted: teamStore.deleteAgent(body.agentId, pid) ? 1 : 0 });
+                    } else {
+                        sendError(res, 'Missing agentId or agentIds', 400);
+                    }
+                } else if (url === '/api/team/agents/delete-inactive') {
+                    const count = teamStore.deleteAgentsByProject(pid);
+                    sendJson(res, { ok: true, deleted: count });
+                } else if (url === '/api/team/delete') {
+                    const result = teamStore.deleteTeam(pid);
+                    sendJson(res, { ok: true, ...result });
+                } else if (url === '/api/team/agents/force-leave') {
+                    const result = teamStore.forceLeaveAgent(body.agentId, pid);
+                    sendJson(res, { ok: result.success, releasedTasks: result.releasedTasks, releasedLocks: result.releasedLocks });
+                } else if (url === '/api/team/agents/update-role') {
+                    sendJson(res, { ok: teamStore.updateAgentRole(body.agentId, body.role, pid) });
+                } else if (url === '/api/team/agents/update-capabilities') {
+                    sendJson(res, { ok: teamStore.updateAgentCapabilities(body.agentId, body.capabilities, pid) });
+                } else if (url === '/api/team/gc') {
+                    const olderThanMs = body.olderThanMs ?? 7 * 24 * 60 * 60 * 1000; // default 7 days
+                    const count = teamStore.gcStaleAgents(pid, olderThanMs);
+                    sendJson(res, { ok: true, deleted: count });
+                } else {
+                    sendError(res, 'Unknown team management endpoint', 404);
+                }
+            } catch (err) {
+                const message = err instanceof Error ? err.message : 'Unknown error';
+                sendError(res, message);
+            }
+            return;
+        }
+
+        // ── Team message listing (GET) ──────────────────────────────────
+        if (url.startsWith('/api/team/messages') && req.method === 'GET') {
+            try {
+                const { initTeamStore } = await import('../team/team-store.js');
+                const teamStore = await initTeamStore(state.dataDir);
+                const parsedUrl = new URL(url, `http://127.0.0.1:${port}`);
+                const filter: Record<string, any> = {};
+                const senderId = parsedUrl.searchParams.get('senderId');
+                const recipientId = parsedUrl.searchParams.get('recipientId');
+                const type = parsedUrl.searchParams.get('type');
+                const since = parsedUrl.searchParams.get('since');
+                const until = parsedUrl.searchParams.get('until');
+                const limit = parsedUrl.searchParams.get('limit');
+                if (senderId) filter.senderId = senderId;
+                if (recipientId) filter.recipientId = recipientId;
+                if (type) filter.type = type;
+                if (since) filter.since = parseInt(since, 10);
+                if (until) filter.until = parseInt(until, 10);
+                if (limit) filter.limit = parseInt(limit, 10);
+                const messages = teamStore.listMessages(state.projectId, filter);
+                sendJson(res, { messages });
+            } catch (err) {
+                const message = err instanceof Error ? err.message : 'Unknown error';
+                sendError(res, message);
+            }
+            return;
+        }
+
         if (url.startsWith('/api/team')) {
             if (!teamInstances) {
                 const parsedUrl = new URL(url, `http://127.0.0.1:${port}`);
