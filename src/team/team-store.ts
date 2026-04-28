@@ -164,6 +164,9 @@ export class TeamStore {
   private stmtLockDeleteByAgent: any = null;
   private stmtLockDeleteExpired: any = null;
 
+  // ── Name resolution prepared statements
+  private stmtAgentFindByName: any = null;
+
   // ── Role prepared statements
   private stmtRoleInsert: any = null;
   private stmtRoleDelete: any = null;
@@ -204,6 +207,10 @@ export class TeamStore {
         last_heartbeat = excluded.last_heartbeat,
         left_at = excluded.left_at
     `);
+
+    this.stmtAgentFindByName = this.db.prepare(
+      `SELECT * FROM team_agents WHERE name = ? AND status = 'active' ORDER BY last_heartbeat DESC`
+    );
 
     this.stmtAgentFindByInstance = this.db.prepare(
       `SELECT * FROM team_agents WHERE project_id = ? AND agent_type = ? AND instance_id = ?`
@@ -465,6 +472,16 @@ export class TeamStore {
 
   getAgentByInstance(projectId: string, agentType: string, instanceId: string): TeamAgentRow | undefined {
     return this.stmtAgentFindByInstance.get(projectId, agentType, instanceId) as TeamAgentRow | undefined;
+  }
+
+  findAgentByName(name: string): TeamAgentRow[] {
+    return this.stmtAgentFindByName.all(name) as TeamAgentRow[];
+  }
+
+  listProjects(): { project_id: string; agent_count: number }[] {
+    return this.db.prepare(
+      `SELECT project_id, COUNT(*) as agent_count FROM team_agents WHERE status = 'active' GROUP BY project_id ORDER BY project_id`
+    ).all() as { project_id: string; agent_count: number }[];
   }
 
   listAgents(projectId: string, filter?: { status?: 'active' | 'inactive' }): TeamAgentRow[] {

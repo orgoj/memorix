@@ -3289,7 +3289,7 @@ export async function createMemorixServer(
     }
   }
 
-  // ── team_manage (join / leave / status / listRoles / addRole / removeRole) ──
+  // ── team_manage (join / leave / status / listRoles / addRole / removeRole / listProjects) ──
   server.registerTool(
     'team_manage',
     {
@@ -3301,9 +3301,10 @@ export async function createMemorixServer(
         'Action "status": list all agents with roles and capabilities, plus role occupancy. ' +
         'Action "listRoles": show defined roles for this project. ' +
         'Action "addRole": define a new role for this project. ' +
-        'Action "removeRole": remove a role definition.',
+        'Action "removeRole": remove a role definition. ' +
+        'Action "listProjects": discover all projects with active teams.',
       inputSchema: {
-        action: z.enum(['join', 'leave', 'status', 'listRoles', 'addRole', 'removeRole']).describe('Operation to perform'),
+        action: z.enum(['join', 'leave', 'status', 'listRoles', 'addRole', 'removeRole', 'listProjects']).describe('Operation to perform'),
         name: z.string().optional().describe('Agent display name for join (e.g., "cursor-frontend")'),
         agentType: z.string().optional().describe('Agent type for join (e.g., "windsurf", "cursor", "claude-code")'),
         instanceId: z.string().optional().describe('Stable instance ID for join (preserves identity across restarts)'),
@@ -3388,6 +3389,19 @@ export async function createMemorixServer(
         const removed = teamStore.removeRole(project.id, roleId);
         if (!removed) return { content: [{ type: 'text' as const, text: 'Role not found' }] };
         return { content: [{ type: 'text' as const, text: `Role removed: ${roleId}` }] };
+      }
+      if (action === 'listProjects') {
+        const projects = teamStore.listProjects();
+        if (projects.length === 0) {
+          return { content: [{ type: 'text' as const, text: 'No projects with active teams.' }] };
+        }
+        const lines = projects.map(p => {
+          const agents = teamStore.listAgents(p.project_id, { status: 'active' });
+          const names = agents.map(a => `${a.name} (${a.role})`).join(', ');
+          const marker = p.project_id === project.id ? ' [current]' : '';
+          return `${p.project_id}${marker} — ${p.agent_count} agent(s): ${names}`;
+        });
+        return { content: [{ type: 'text' as const, text: `Projects with active teams:\n\n${lines.join('\n')}` }] };
       }
       // status - now includes role occupancy
       const agents = teamStore.listAgents(project.id);
@@ -3567,17 +3581,35 @@ export async function createMemorixServer(
         markRead: z.boolean().optional().default(false).describe('Mark messages as read (for inbox)'),
         toRole: z.string().optional().describe('Target role for role-based messaging/handoff (for send)'),
         handoffStatus: z.enum(['open', 'claimed', 'completed', 'archived']).optional().describe('Handoff status (for send with type=handoff)'),
+        targetProject: z.string().optional().describe('Target project ID for cross-project messaging (for send). Message is stored in the target project.'),
       },
     },
-    async ({ action, from, to, type: msgType, content, agentId, markRead, toRole, handoffStatus }) => {
+    async ({ action, from, to, type: msgType, content, agentId, markRead, toRole, handoffStatus, targetProject }) => {
       if (action === 'send') {
         if (!from || !msgType || !content) return { content: [{ type: 'text' as const, text: '[ERROR] from, type, and content required for send' }], isError: true };
         if (!to && !toRole) return { content: [{ type: 'text' as const, text: '[ERROR] either to (agent ID) or toRole is required for send' }], isError: true };
         if (content.length > 10_000) return { content: [{ type: 'text' as const, text: '[ERROR] Message too large (max 10KB)' }], isError: true };
+        // Resolve name → agent ID if `to` is not a UUID
+        let resolvedTo = to ?? null;
+        if (resolvedTo) {
+          const direct = teamStore.getAgent(resolvedTo);
+          if (!direct) {
+            const byName = teamStore.findAgentByName(resolvedTo);
+            if (byName.length === 0) {
+              return { content: [{ type: 'text' as const, text: `[ERROR] Agent '${resolvedTo}' not found by ID or name` }], isError: true };
+            }
+            if (byName.length > 1) {
+              const matches = byName.map(a => `${a.name} (ID: ${a.agent_id.slice(0, 8)}…, project: ${a.project_id})`).join('\n');
+              return { content: [{ type: 'text' as const, text: `[ERROR] Multiple agents named '${resolvedTo}'. Specify ID:\n${matches}` }], isError: true };
+            }
+            resolvedTo = byName[0].agent_id;
+          }
+        }
+        const msgProjectId = targetProject || project.id;
         const msg = teamStore.sendMessage({
-          projectId: project.id,
+          projectId: msgProjectId,
           senderAgentId: from,
-          recipientAgentId: to ?? null,
+          recipientAgentId: resolvedTo,
           type: msgType,
           content,
           toRole: toRole ?? null,
@@ -3592,8 +3624,11 @@ export async function createMemorixServer(
             data: buildTeamEventPayload(msg, { senderName: sender?.name }),
           });
         } catch { /* best effort — never block message delivery */ }
-        const target = to ? `agent ${to.slice(0, 8)}…` : `role ${toRole}`;
-        return { content: [{ type: 'text' as const, text: `Message sent (${msgType}) to ${target} | ID: ${msg.id.slice(0, 8)}…${toRole ? ` [role: ${toRole}]` : ''}` }] };
+        const recipient = teamStore.getAgent(resolvedTo ?? '');
+        const targetLabel = recipient ? `${recipient.name}` : (to ? `agent ${to.slice(0, 8)}…` : `role ${toRole}`);
+        const projectHint = targetProject && targetProject !== project.id ? ` [project: ${targetProject}]` : '';
+        const nameHint = to !== resolvedTo && to ? ` (resolved from "${to}")` : '';
+        return { content: [{ type: 'text' as const, text: `Message sent (${msgType}) to ${targetLabel}${nameHint} | ID: ${msg.id.slice(0, 8)}…${toRole ? ` [role: ${toRole}]` : ''}${projectHint}` }] };
       }
       if (action === 'broadcast') {
         if (!from || !msgType || !content) return { content: [{ type: 'text' as const, text: '[ERROR] from, type, and content required for broadcast' }], isError: true };

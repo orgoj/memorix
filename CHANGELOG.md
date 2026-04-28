@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.9] - 2026-04-28
+
+### Added -- Cross-Project Agent Communication
+- **`team_manage listProjects`** — discover all projects with active teams. Returns project IDs with agent counts and names, enabling cross-project awareness.
+- **`team_message send` accepts `targetProject`** — route a message to an agent in a different project by specifying the target project ID. Message is stored in the target project so the recipient sees it in their normal inbox.
+- **Agent name resolution in `team_message send`** — the `to` parameter now accepts agent names (not just UUIDs). Names are resolved automatically; ambiguous names produce a clear error listing matches.
+
 ## [1.0.8] - 2026-04-19
 
 ### Added -- Operator CLI Surface

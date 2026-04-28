@@ -511,11 +511,13 @@ Register, unregister, or inspect agents.
 
 Important inputs:
 
-- `action`
+- `action` — `join`, `leave`, `status`, `listRoles`, `addRole`, `removeRole`, `listProjects`
 - optional `name`
 - optional `role`
 - optional `capabilities`
 - optional `agentId`
+
+`listProjects` discovers all projects with active teams (cross-project awareness).
 
 ### `team_message`
 
@@ -526,10 +528,11 @@ Important inputs:
 - `action`
 - optional `agentId`
 - optional `from`
-- optional `to`
+- optional `to` — agent ID or agent **name** (resolved automatically)
 - optional `content`
 - optional `type`
 - optional `markRead`
+- optional `targetProject` — route message to a different project (cross-project messaging)
 
 ### `team_task`
 
