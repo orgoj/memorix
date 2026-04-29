@@ -13,11 +13,19 @@ export function buildTeamEventPayload(
   message: TeamMessageRow,
   options: { senderName?: string } = {},
 ): Record<string, unknown> {
-  return {
+  const payload: Record<string, unknown> = {
     kind: 'memorix_team_message',
     id: message.id,
     from: options.senderName ?? message.sender_agent_id,
     type: message.type,
     description: describeTeamMessage(message.content),
   };
+  // Include recipient info so clients can filter
+  if (message.recipient_agent_id) {
+    payload.to = message.recipient_agent_id;
+  }
+  if (message.to_role) {
+    payload.toRole = message.to_role;
+  }
+  return payload;
 }

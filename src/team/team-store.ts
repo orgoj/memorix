@@ -1016,6 +1016,16 @@ export class TeamStore {
     return count;
   }
 
+  /** Delete all inactive agents across all projects. */
+  deleteAllInactiveAgents(): number {
+    const inactiveAgents = this.db.prepare('SELECT * FROM team_agents WHERE status = ?').all('inactive') as TeamAgentRow[];
+    let count = 0;
+    for (const agent of inactiveAgents) {
+      if (this.deleteAgent(agent.agent_id, agent.project_id)) count++;
+    }
+    return count;
+  }
+
   /**
    * Delete all team data for a project (agents, messages, tasks, deps, locks, roles).
    * Runs inside a transaction.
@@ -1133,9 +1143,11 @@ export class TeamStore {
 
   /**
    * Permanent garbage collection of inactive agents older than threshold.
+   * First marks stale "active" agents as inactive, then deletes old inactive ones.
    * Returns count of agents deleted.
    */
   gcStaleAgents(projectId: string, olderThanMs: number): number {
+    this.detectAndMarkStale(projectId, olderThanMs);
     const threshold = Date.now() - olderThanMs;
     const inactiveAgents = (this.listAgents(projectId, { status: 'inactive' }) as TeamAgentRow[])
       .filter(a => {
@@ -1148,6 +1160,16 @@ export class TeamStore {
       if (this.deleteAgent(agent.agent_id, projectId)) count++;
     }
     return count;
+  }
+
+  /** GC stale agents across all projects. */
+  gcAllStaleAgents(olderThanMs: number): number {
+    const allProjects = this.db.prepare('SELECT DISTINCT project_id FROM team_agents').all() as { project_id: string }[];
+    let total = 0;
+    for (const { project_id } of allProjects) {
+      total += this.gcStaleAgents(project_id, olderThanMs);
+    }
+    return total;
   }
 
   // ═══════════════════════════════════════════════════════════════════

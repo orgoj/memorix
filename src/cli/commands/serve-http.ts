@@ -131,13 +131,17 @@ export default defineCommand({
       server: Awaited<ReturnType<typeof createMemorixServer>>['server'];
       switchProject: Awaited<ReturnType<typeof createMemorixServer>>['switchProject'];
       isExplicitlyBound: Awaited<ReturnType<typeof createMemorixServer>>['isExplicitlyBound'];
+      getCurrentAgentId?: () => string | undefined;
     };
 
     // Session map: sessionId → transport + per-session server state
     const sessions = new Map<string, SessionState>();
 
     /**
-     * Broadcast a team event to ALL active sessions via sendLoggingMessage().
+     * Route a team event to the correct sessions.
+     * - Direct message (data.to = agent_id): send only to the recipient's session(s).
+     * - Role message (data.toRole): send to all sessions with agents in that role.
+     * - Broadcast (no to/toRole): send to ALL active sessions.
      * Uses Promise.allSettled so one dead transport never blocks others.
      */
     async function broadcastToAllSessions(event: {
@@ -145,7 +149,28 @@ export default defineCommand({
       logger: string;
       data: Record<string, unknown>;
     }) {
-      const targets = Array.from(sessions.values());
+      const allSessions = Array.from(sessions.values());
+      const recipientAgentId = event.data.to as string | undefined;
+      const recipientRole = event.data.toRole as string | undefined;
+      const senderAgentId = event.data.from as string | undefined;
+
+      let targets: typeof allSessions;
+
+      if (recipientAgentId) {
+        // Direct message — find sessions belonging to recipient
+        targets = allSessions.filter(s => {
+          const agentId = s.getCurrentAgentId?.();
+          return agentId === recipientAgentId;
+        });
+      } else if (recipientRole) {
+        // Role message — find sessions with agents in that role
+        // For now, broadcast to all (role mapping requires team store access)
+        targets = allSessions;
+      } else {
+        // True broadcast — send to everyone
+        targets = allSessions;
+      }
+
       await Promise.allSettled(targets.map(async (state) => {
         try { await state.server.server.sendLoggingMessage(event); } catch { /* best effort */ }
       }));
@@ -398,7 +423,7 @@ export default defineCommand({
             onTeamEvent: broadcastToAllSessions,
           },
         );
-        createdState = { transport, server, switchProject, isExplicitlyBound };
+        createdState = { transport, server, switchProject, isExplicitlyBound, getCurrentAgentId: server.getCurrentAgentId };
         await server.connect(transport);
 
         const persistRoot = async (rootPath: string) => {
@@ -608,6 +633,16 @@ export default defineCommand({
       }
     }
 
+    /** Read request body as string. */
+    function readBody(req: IncomingMessage): Promise<string> {
+      return new Promise((resolve, reject) => {
+        const chunks: Buffer[] = [];
+        req.on('data', (c: Buffer) => chunks.push(c));
+        req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+        req.on('error', reject);
+      });
+    }
+
     /** Handle dashboard API routes */
     async function handleDashApi(req: IncomingMessage, res: ServerResponse) {
       const url = new URL(req.url || '/', `http://localhost:${port}`);
@@ -729,6 +764,53 @@ export default defineCommand({
             openHandoffs,
             totalUnread,
           });
+          return;
+        }
+
+        // ── Team management mutation endpoints (POST) ────────────────
+        if (apiPath.startsWith('/team/') && req.method === 'POST') {
+          try {
+            const { projectId: resolvedProjectId } = await resolveRequestProject(url);
+            const body = JSON.parse(await readBody(req));
+            const projectId = body.projectId || resolvedProjectId;
+
+            if (apiPath === '/team/agents/delete') {
+              if (body.agentIds && Array.isArray(body.agentIds)) {
+                let count = 0;
+                for (const id of body.agentIds) { if (sharedTeamStore.deleteAgent(id, projectId)) count++; }
+                sendJson({ ok: true, deleted: count });
+              } else if (body.agentId) {
+                sendJson({ ok: true, deleted: sharedTeamStore.deleteAgent(body.agentId, projectId) ? 1 : 0 });
+              } else {
+                sendJson({ error: 'Missing agentId or agentIds' }, 400);
+              }
+            } else if (apiPath === '/team/agents/delete-inactive') {
+              const count = body.scope === 'global'
+                ? sharedTeamStore.deleteAllInactiveAgents()
+                : sharedTeamStore.deleteAgentsByProject(projectId);
+              sendJson({ ok: true, deleted: count });
+            } else if (apiPath === '/team/delete') {
+              const result = sharedTeamStore.deleteTeam(projectId);
+              sendJson({ ok: true, ...result });
+            } else if (apiPath === '/team/agents/force-leave') {
+              const result = sharedTeamStore.forceLeaveAgent(body.agentId, projectId);
+              sendJson({ ok: result.success, releasedTasks: result.releasedTasks, releasedLocks: result.releasedLocks });
+            } else if (apiPath === '/team/agents/update-role') {
+              sendJson({ ok: sharedTeamStore.updateAgentRole(body.agentId, body.role, projectId) });
+            } else if (apiPath === '/team/agents/update-capabilities') {
+              sendJson({ ok: sharedTeamStore.updateAgentCapabilities(body.agentId, body.capabilities, projectId) });
+            } else if (apiPath === '/team/gc') {
+              const olderThanMs = body.olderThanMs ?? 7 * 24 * 60 * 60 * 1000;
+              const count = body.scope === 'global'
+                ? sharedTeamStore.gcAllStaleAgents(olderThanMs)
+                : sharedTeamStore.gcStaleAgents(projectId, olderThanMs);
+              sendJson({ ok: true, deleted: count });
+            } else {
+              sendJson({ error: 'Unknown team management endpoint' }, 404);
+            }
+          } catch (err) {
+            sendJson({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
+          }
           return;
         }
 

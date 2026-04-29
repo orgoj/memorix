@@ -918,7 +918,7 @@ export async function startDashboard(
                         sendError(res, 'Missing agentId or agentIds', 400);
                     }
                 } else if (url === '/api/team/agents/delete-inactive') {
-                    const count = teamStore.deleteAgentsByProject(pid);
+                    const count = body.scope === 'global' ? teamStore.deleteAllInactiveAgents() : teamStore.deleteAgentsByProject(pid);
                     sendJson(res, { ok: true, deleted: count });
                 } else if (url === '/api/team/delete') {
                     const result = teamStore.deleteTeam(pid);
@@ -932,7 +932,7 @@ export async function startDashboard(
                     sendJson(res, { ok: teamStore.updateAgentCapabilities(body.agentId, body.capabilities, pid) });
                 } else if (url === '/api/team/gc') {
                     const olderThanMs = body.olderThanMs ?? 7 * 24 * 60 * 60 * 1000; // default 7 days
-                    const count = teamStore.gcStaleAgents(pid, olderThanMs);
+                    const count = body.scope === 'global' ? teamStore.gcAllStaleAgents(olderThanMs) : teamStore.gcStaleAgents(pid, olderThanMs);
                     sendJson(res, { ok: true, deleted: count });
                 } else {
                     sendError(res, 'Unknown team management endpoint', 404);

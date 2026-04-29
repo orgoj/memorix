@@ -1,6 +1,9 @@
-allow npm run build
-allow memorix *
 allow git *
+allow memorix *
+allow npm run build
+allow npm run lint
+allow npm test *
+allow sqlite3 .memorix/memorix.db *
 
 allow-read ../memorix*/**
 allow-edit ../memorix*/**

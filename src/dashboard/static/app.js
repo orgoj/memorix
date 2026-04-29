@@ -3434,10 +3434,10 @@ async function loadTeam() {
                   <div class="team-agent-time">${t('teamJoined')} ${teamTimeAgo(a.joinedAt)} · ${t('teamSeen')} ${teamTimeAgo(a.lastSeenAt)}${a.leftAt ? ' · ' + t('teamLeft') + ' ' + teamTimeAgo(a.leftAt) : ''}</div>
                 </div>
                 ${a.unread > 0 ? '<span class="team-unread-badge">' + a.unread + '</span>' : ''}
-                <span class="team-agent-id">${(a.id || '').slice(0, 8)}</span>
+                <span class="team-agent-id">${(a.id || '').slice(0, 8)}${teamScope === 'global' && a.projectId ? ' · ' + a.projectId.split('/').pop() : ''}</span>
                 <div class="team-agent-actions">
-                  ${a.status === 'active' ? '<button class="team-action-btn" data-action="force-leave" data-agent-id="' + escapeHtml(a.id) + '" data-agent-name="' + escapeHtml(a.name) + '" title="' + t('teamForceLeave') + '"><span class="iconify" data-icon="lucide:log-out" style="font-size:13px;"></span></button>' : ''}
-                  ${a.status !== 'active' ? '<button class="team-action-btn team-danger-btn" data-action="delete-agent" data-agent-id="' + escapeHtml(a.id) + '" data-agent-name="' + escapeHtml(a.name) + '" title="' + t('teamDeleteAgent') + '"><span class="iconify" data-icon="lucide:trash-2" style="font-size:13px;"></span></button>' : ''}
+                  ${a.status === 'active' ? '<button class="team-action-btn" data-action="force-leave" data-agent-id="' + escapeHtml(a.id) + '" data-agent-name="' + escapeHtml(a.name) + '" data-agent-project="' + escapeHtml(a.projectId || '') + '" title="' + t('teamForceLeave') + '"><span class="iconify" data-icon="lucide:log-out" style="font-size:13px;"></span></button>' : ''}
+                  ${a.status !== 'active' ? '<button class="team-action-btn team-danger-btn" data-action="delete-agent" data-agent-id="' + escapeHtml(a.id) + '" data-agent-name="' + escapeHtml(a.name) + '" data-agent-project="' + escapeHtml(a.projectId || '') + '" title="' + t('teamDeleteAgent') + '"><span class="iconify" data-icon="lucide:trash-2" style="font-size:13px;"></span></button>' : ''}
                 </div>
               </div>`;
               }).join('')
@@ -3535,16 +3535,20 @@ async function loadTeam() {
 
   container.innerHTML = html;
 
-  // Delegated event listener for team action buttons (avoids XSS from inline onclick)
-  container.addEventListener('click', function(e) {
-    const btn = e.target.closest('[data-action]');
-    if (!btn) return;
-    const action = btn.dataset.action;
-    const agentId = btn.dataset.agentId || '';
-    const agentName = btn.dataset.agentName || '';
-    if (action === 'delete-agent') teamDeleteAgent(agentId, agentName);
-    else if (action === 'force-leave') teamForceLeave(agentId, agentName);
-  });
+  // Delegated event listener for team action buttons (added once)
+  if (!container._teamClickDelegated) {
+    container._teamClickDelegated = true;
+    container.addEventListener('click', function(e) {
+      const btn = e.target.closest('[data-action]');
+      if (!btn) return;
+      const action = btn.dataset.action;
+      const agentId = btn.dataset.agentId || '';
+      const agentName = btn.dataset.agentName || '';
+      const agentProject = btn.dataset.agentProject || '';
+      if (action === 'delete-agent') teamDeleteAgent(agentId, agentName, agentProject);
+      else if (action === 'force-leave') teamForceLeave(agentId, agentName, agentProject);
+    });
+  }
 
   // Show last refresh time
   const indicator = document.getElementById('team-refresh-indicator');
@@ -3564,43 +3568,51 @@ async function teamPostAction(endpoint, body) {
   const res = await fetch('/api/team/' + endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ projectId: selectedProject || undefined, ...body }),
   });
+  if (!res.ok) {
+    let msg = 'Error ' + res.status;
+    try { const err = await res.json(); if (err.error) msg = err.error; } catch { /* not JSON */ }
+    alert(msg);
+    return { ok: false };
+  }
   return res.json();
 }
 
-function teamDeleteAgent(agentId, name) {
+function teamDeleteAgent(agentId, name, agentProject) {
   if (!confirm(t('teamDeleteConfirm').replace('%name%', name))) return;
-  teamPostAction('agents/delete', { agentId }).then(r => {
+  const body = { agentId };
+  if (agentProject) body.projectId = agentProject;
+  teamPostAction('agents/delete', body).then(r => {
     if (r.ok) loadTeam();
   });
 }
 
-function teamForceLeave(agentId, name) {
+function teamForceLeave(agentId, name, agentProject) {
   if (!confirm(t('teamForceLeaveConfirm').replace('%name%', name))) return;
-  teamPostAction('agents/force-leave', { agentId }).then(r => {
+  const body = { agentId };
+  if (agentProject) body.projectId = agentProject;
+  teamPostAction('agents/force-leave', body).then(r => {
     if (r.ok) loadTeam();
   });
 }
 
 function teamCleanupInactive() {
-  if (!confirm(t('teamCleanupConfirm').replace('%count%', 'all inactive'))) return;
-  teamPostAction('agents/delete-inactive', {}).then(r => {
+  if (!confirm(t('teamCleanupConfirm').replace('%count%', teamScope === 'global' ? 'all inactive (global)' : 'all inactive'))) return;
+  teamPostAction('agents/delete-inactive', { scope: teamScope }).then(r => {
     if (r.ok) { delete loaded['team']; loadTeam(); }
   });
 }
 
 function teamGarbageCollect() {
   if (!confirm(t('teamGCConfirm'))) return;
-  teamPostAction('gc', {}).then(r => {
+  teamPostAction('gc', { scope: teamScope, olderThanMs: 1 * 60 * 60 * 1000 }).then(r => {
     if (r.ok) { delete loaded['team']; loadTeam(); }
   });
 }
 
 function teamReset() {
   if (!confirm(t('teamResetConfirm'))) return;
-  const name = prompt(t('teamResetDoubleConfirm'));
-  if (!name) return;
   teamPostAction('delete', {}).then(r => {
     if (r.ok) { delete loaded['team']; loadTeam(); }
   });

@@ -231,6 +231,7 @@ export async function createMemorixServer(
   switchProject: (newCwd: string) => Promise<boolean>;
   isExplicitlyBound: () => boolean;
   handleTransportClose: () => void;
+  getCurrentAgentId: () => string | undefined;
 }> {
   // Detect current project — strict .git-based detection
   const allowUntrackedFallback = options.allowUntrackedFallback ?? true;
@@ -4223,5 +4224,6 @@ export async function createMemorixServer(
     server, graphManager, projectId: project.id, deferredInit, switchProject,
     isExplicitlyBound: () => explicitProjectBound,
     handleTransportClose,
+    getCurrentAgentId: () => currentAgentId,
   };
 }
